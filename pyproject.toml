@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pytest-flaky-triage"
+version = "2.0.0"
+description = "Three-stage pytest flaky-test detection, statistical root-cause inference, and AST fault-side triage tool"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pytest>=7.4",
+]
+
+[project.scripts]
+pytest-flaky-triage = "flaky_triage.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
