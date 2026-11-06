@@ -1,0 +1,4 @@
+run_id,condition,condition_value,position,test_id,outcome
+1,repeat,"1",1,"check_crash.py::test_first",passed
+1,repeat,"1",,"check_crash.py::test_kills_process",not_run
+1,repeat,"1",,"check_crash.py::test_third",not_run

@@ -1,0 +1,5 @@
+run_id,condition,condition_value,position,test_id,outcome
+1,repeat,"1",1,"check_top.py::TestOuter::test_method",passed
+1,repeat,"1",2,"check_top.py::TestOuter::TestInner::test_nested",passed
+1,repeat,"1",3,"sub/deeper/check_deep.py::test_in_subfolder",passed
+1,repeat,"1",4,"sub/deeper/check_deep.py::TestFails::test_method_fails",failed

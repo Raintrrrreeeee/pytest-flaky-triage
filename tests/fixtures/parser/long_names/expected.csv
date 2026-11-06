@@ -1,0 +1,4 @@
+run_id,condition,condition_value,position,test_id,outcome
+1,repeat,"1",1,"check_long.py::test_this_name_is_far_longer_than_a_normal_terminal_line_so_pytest_cannot_pad_the_status_column_at_all",passed
+1,repeat,"1",2,"check_long.py::test_long_parameter[value0]",passed
+1,repeat,"1",3,"check_long.py::test_long_custom_id[iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii]",failed

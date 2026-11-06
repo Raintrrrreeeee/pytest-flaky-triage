@@ -1,0 +1,4 @@
+run_id,condition,condition_value,position,test_id,outcome
+1,repeat,"1",1,"check_lookalike.py::test_label[x PASSED y]",passed
+1,repeat,"1",2,"check_lookalike.py::test_label[x FAILED y]",failed
+1,repeat,"1",3,"check_lookalike.py::test_label[ERROR]",passed

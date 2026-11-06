@@ -1,0 +1,8 @@
+run_id,condition,condition_value,position,test_id,outcome
+1,repeat,"1",1,"check_outcomes.py::test_passes",passed
+1,repeat,"1",2,"check_outcomes.py::test_fails",failed
+1,repeat,"1",3,"check_outcomes.py::test_setup_error",error
+1,repeat,"1",4,"check_outcomes.py::test_skipped",skipped
+1,repeat,"1",5,"check_outcomes.py::test_skip_marker",skipped
+1,repeat,"1",6,"check_outcomes.py::test_xfail",xfailed
+1,repeat,"1",7,"check_outcomes.py::test_xpass",xpassed

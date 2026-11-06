@@ -1,0 +1,4 @@
+run_id,condition,condition_value,position,test_id,outcome
+1,repeat,"1",1,"check_teardown.py::test_pass_then_teardown_error",error
+1,repeat,"1",2,"check_teardown.py::test_fail_then_teardown_error",error
+1,repeat,"1",3,"check_teardown.py::test_unaffected",passed
