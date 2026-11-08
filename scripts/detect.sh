@@ -43,6 +43,7 @@ PYTHON=""
 TARGET_SUBPATH=""
 KEYWORD_EXPR=""
 REPORT=yes
+REPORT_LANG="en"
 
 usage() {
     cat <<EOF
@@ -66,6 +67,7 @@ Options:
   --timeout SECONDS          limit for a single pytest run (default $TIMEOUT)
   --out DIR                  output folder (default out/)
   --python PATH              Python interpreter with pytest installed for target
+  --lang LANG                report language: 'en' or 'zh' (default $REPORT_LANG)
   --no-report                stop after writing results.csv
   -h, --help                 show this help
 EOF
@@ -90,7 +92,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help) usage; exit 0 ;;
         --no-report) REPORT=no; shift; continue ;;
-        --project|--target|-k|--repeats|--hash-seeds|--orders|--isolated|--isolated-scope|--timeout|--out|--python)
+        --project|--target|-k|--repeats|--hash-seeds|--orders|--isolated|--isolated-scope|--timeout|--out|--python|--lang)
             [[ $# -ge 2 ]] || die "$1 needs a value (see --help)"
             ;;
         *) die "unknown option '$1' (see --help)" ;;
@@ -107,6 +109,7 @@ while [[ $# -gt 0 ]]; do
         --timeout)        TIMEOUT=$2 ;;
         --out)            OUT_DIR=$2 ;;
         --python)         PYTHON=$2 ;;
+        --lang)           REPORT_LANG=$2 ;;
     esac
     shift 2
 done
@@ -122,6 +125,10 @@ is_uint "$TIMEOUT" || die "--timeout must be a whole number of seconds >= 1 (got
 case $ISOLATED_SCOPE in
     all|smart) ;;
     *) die "--isolated-scope must be 'all' or 'smart' (got '$ISOLATED_SCOPE')" ;;
+esac
+case $REPORT_LANG in
+    en|zh) ;;
+    *) die "--lang must be 'en' or 'zh' (got '$REPORT_LANG')" ;;
 esac
 
 REPEATS=$((10#$REPEATS)); ORDERS=$((10#$ORDERS))
@@ -515,7 +522,7 @@ if [[ ! -d $TOOL_ROOT/src/report && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
     exit 0
 fi
 report_rc=0
-PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m report "$OUT_DIR/diagnosis.json" "$OUT_DIR" --project "$PROJECT" || report_rc=$?
+PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m report "$OUT_DIR/diagnosis.json" "$OUT_DIR" --project "$PROJECT" --lang "$REPORT_LANG" || report_rc=$?
 case $report_rc in
     0) say "report:    $OUT_REL/report.md" ;;
     2) die "report stage rejected its arguments (exit 2)" "$E_REPORT" ;;

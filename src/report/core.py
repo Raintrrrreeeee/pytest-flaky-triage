@@ -496,8 +496,95 @@ def generate_report(diagnosis, project_dir=None):
     }
 
 
-def render_markdown(diagnosis, project_dir=None):
-    """Render a concise, visually aligned Markdown triage report."""
+_ZH_CAUSE_LABELS = {
+    "hash_order_sensitivity": "哈希顺序敏感",
+    "shared_state_interference": "共享状态污染",
+    "unseeded_randomness": "未固定随机种子",
+    "race_conditions": "并发时间竞态",
+}
+
+_ZH_SIDE_LABELS = {
+    "Test Side": "测试侧 (Test Side)",
+    "Code Side": "业务侧 (Code Side)",
+    "Both": "双侧 (Both)",
+}
+
+_ZH_BASIS_LABELS = {
+    "Runtime+AST": "运行时+AST",
+    "AST Hint *": "AST 消歧 *",
+    "Runtime Only": "仅运行时",
+    "Runtime (Conflict)": "运行时 (AST冲突)",
+}
+
+
+def _translate_reason_zh(reason):
+    text = reason
+    polluter_suffix = ""
+    if " Suspected polluting predecessor(s): " in text:
+        text, p_part = text.split(" Suspected polluting predecessor(s): ", 1)
+        polluter_suffix = f" 疑似前置污染源测试：{p_part.rstrip('.')}。"
+    mapping = {
+        "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.": (
+            "在相同哈希种子与相同执行顺序下结果仍发生波动；需结合源码 AST 检查区分随机性与并发竞态。"
+        ),
+        "Outcomes were uniform during the finite repeat window but flipped across independent perturbations; source investigation is needed to distinguish probabilistic randomness or concurrency races.": (
+            "在有限次重复基线中结果一致，但在独立扰动维度间发生翻转；需结合源码 AST 检查区分低概率随机性与并发竞态。"
+        ),
+        "Outcomes differ across hash seeds while repeat outcomes are consistent.": (
+            "固定条件下重复运行结果一致，但切换 PYTHONHASHSEED 哈希种子时结果发生翻转。"
+        ),
+        "Outcomes differ across test orders, or isolated executions pass while suite executions fail, with a consistent repeat baseline.": (
+            "重复运行基线一致，但改变测试执行顺序时结果翻转（或在套件中失败、单测隔离时通过）。"
+        ),
+        "Outcomes differ across test orders, or isolated executions differ from suite executions, with a consistent repeat baseline.": (
+            "重复运行基线一致，但改变测试执行顺序或单测隔离运行时结果与套件运行不一致。"
+        ),
+    }
+    return mapping.get(text, text) + polluter_suffix
+
+
+def _translate_hint_zh(hint):
+    text = hint
+    text = text.replace("unsorted `join(...)` on unordered `set` from", "对来自以下位置的无序 `set` 执行了未排序的 `join(...)`：")
+    text = text.replace("iterates or converts unordered `set` without sorting", "对无序 `set` 进行了未排序的遍历或转换")
+    text = text.replace("accesses/mutates shared module-level object", "读写/修改了模块级共享对象")
+    text = text.replace("mutates shared module-level variable", "通过 `global` 修改了模块级共享变量")
+    text = text.replace("accesses/mutates shared module-level state", "读写/修改了业务模块级共享状态")
+    text = text.replace("(declared at ", "（声明于 ")
+    text = text.replace(" without a fixed seed", " 且未固定随机种子")
+    text = text.replace("calls ", "调用了 ")
+    text = text.replace("uses unsynchronized concurrency/timing primitives", "使用了未同步的并发/计时原语")
+    text = text.replace("AST hint (no runtime cause):", "AST 提示（无运行时归因）：")
+    text = text.replace("Conflicting AST hint:", "冲突的 AST 提示：")
+    if "（声明于 " in text and text.endswith(")"):
+        text = text[:-1] + "）"
+    return text
+
+
+def _translate_warning_zh(warning):
+    mapping = {
+        "Fewer than two valid executions; verdict is inconclusive.": "有效执行次数少于 2 次，判定结果为无法定论（inconclusive）。",
+        "Excluded/invalid observations do not contribute to the score or verdict.": "被跳过或无效的观测记录不计入稳定性得分与判定结果。",
+        "Abnormal runs exist; completed outcomes contribute to scores but not suspected causes.": "存在异常运行轮次；已完成的测试结果计入得分，但不作为根因推断依据。",
+        "Mixed outcomes observed, but insufficient unconfounded evidence to assign a suspected cause.": "观测到通过与失败混合出现，但缺乏无干扰的对照证据来锁定具体怀疑根因。",
+    }
+    if warning in mapping:
+        return mapping[warning]
+    if warning.startswith("Incomplete runs excluded from suspected-cause inference: "):
+        rest = warning.split("Incomplete runs excluded from suspected-cause inference: ", 1)[1]
+        run_ids = rest.split(". Their completed outcomes")[0]
+        return f"未完成运行轮次已从根因推断中排除：{run_ids}（已完成测试仍计入得分与判定结果）。"
+    if warning.startswith("No valid evidence for conditions: "):
+        conds = warning.split("No valid evidence for conditions: ", 1)[1]
+        return f"以下实验条件缺少有效观测证据：{conds}"
+    return warning
+
+
+def render_markdown(diagnosis, project_dir=None, lang="en"):
+    """Render a concise, visually aligned Markdown triage report in English ('en') or Chinese ('zh')."""
+    if lang not in ("en", "zh"):
+        raise ValueError(f"Unsupported report language: {lang}")
+    is_zh = lang == "zh"
     bundle = generate_report(diagnosis, project_dir=project_dir)
     diag = bundle["diagnosis"]
     runs_by_id = bundle["runs_by_id"]
@@ -511,30 +598,54 @@ def render_markdown(diagnosis, project_dir=None):
         if r["status"] != "ok" or r["tests_reported"] < r["tests_expected"]
     ]
 
-    lines = [
-        "# Test-Stability Triage Report",
-        "",
-        "## 1. Overview Summary",
-        "",
-        f"- **Tests Analysed:** {summary['tests']}",
-        f"- **Total Matrix Runs:** {summary['runs']} ({summary['records']} recorded observations)",
-        f"- **Verdict Breakdown:** "
-        f"`flaky`: {verdicts['flaky']} | "
-        f"`stable`: {verdicts['stable']} | "
-        f"`consistently_failing`: {verdicts['consistently_failing']} | "
-        f"`inconclusive`: {verdicts['inconclusive']}",
-        f"- **Abnormal / Incomplete Runs:** {len(abnormal_runs)}",
-        f"- **Scoring Policy:** `{policy['stability_score']}` (minimum valid runs: {policy.get('minimum_valid_runs', 2)})",
-        f"- **Interpretation Note:** {policy['scope']} Stability scores measure observed pass frequency, not confidence in a proven root cause. Source-based indicators below are heuristic hints to help disambiguate runtime candidates.",
-        "",
-        "## 2. Test Triage Summary Table",
-        "",
-    ]
-
-    s2_headers = [
-        "Test", "Verdict", "Score", "Repeat", "Hashseed",
-        "Order", "Isolated", "Suspected Cause", "Fault Side", "Basis",
-    ]
+    if is_zh:
+        lines = [
+            "# 测试稳定性诊断报告 (Test-Stability Triage Report)",
+            "",
+            "## 1. 概览摘要",
+            "",
+            f"- **分析测试总数：** {summary['tests']}",
+            f"- **实验矩阵总轮数：** {summary['runs']}（共记录 {summary['records']} 条观测结果）",
+            f"- **判定结果分布：** "
+            f"`flaky`（不稳定）: {verdicts['flaky']} | "
+            f"`stable`（稳定）: {verdicts['stable']} | "
+            f"`consistently_failing`（持续失败）: {verdicts['consistently_failing']} | "
+            f"`inconclusive`（证据不足）: {verdicts['inconclusive']}",
+            f"- **异常 / 未完成运行轮数：** {len(abnormal_runs)}",
+            f"- **稳定性计分规则：** `{policy['stability_score']}`（最少有效运行轮数：{policy.get('minimum_valid_runs', 2)}）",
+            "- **结果解读说明：** 仅基于实际观测到的执行结果；怀疑根因为统计相关性，不等同于绝对根因证明。稳定性得分衡量观测到的通过频率，下方基于源码 AST 的指标为辅助消歧运行时候选根因的启发式提示。",
+            "",
+            "## 2. 测试诊断汇总表",
+            "",
+        ]
+        s2_headers = [
+            "测试名称", "判定结果", "稳定性得分", "重复基线 (Repeat)", "哈希种子 (Hashseed)",
+            "执行顺序 (Order)", "单测隔离 (Isolated)", "怀疑根因", "责任归属", "判定依据",
+        ]
+    else:
+        lines = [
+            "# Test-Stability Triage Report",
+            "",
+            "## 1. Overview Summary",
+            "",
+            f"- **Tests Analysed:** {summary['tests']}",
+            f"- **Total Matrix Runs:** {summary['runs']} ({summary['records']} recorded observations)",
+            f"- **Verdict Breakdown:** "
+            f"`flaky`: {verdicts['flaky']} | "
+            f"`stable`: {verdicts['stable']} | "
+            f"`consistently_failing`: {verdicts['consistently_failing']} | "
+            f"`inconclusive`: {verdicts['inconclusive']}",
+            f"- **Abnormal / Incomplete Runs:** {len(abnormal_runs)}",
+            f"- **Scoring Policy:** `{policy['stability_score']}` (minimum valid runs: {policy.get('minimum_valid_runs', 2)})",
+            f"- **Interpretation Note:** {policy['scope']} Stability scores measure observed pass frequency, not confidence in a proven root cause. Source-based indicators below are heuristic hints to help disambiguate runtime candidates.",
+            "",
+            "## 2. Test Triage Summary Table",
+            "",
+        ]
+        s2_headers = [
+            "Test", "Verdict", "Score", "Repeat", "Hashseed",
+            "Order", "Isolated", "Suspected Cause", "Fault Side", "Basis",
+        ]
     s2_alignments = [
         "left", "center", "center", "center", "center",
         "center", "center", "left", "center", "left",
@@ -559,13 +670,24 @@ def render_markdown(diagnosis, project_dir=None):
         iso_cell = _fmt_cond_cell(conds["isolated"])
 
         resolved_cands = res["resolved_candidates"]
-        cause_str = " / ".join(f"`{c}`" for c in resolved_cands) if resolved_cands else "—"
-        side_str = (
+        if resolved_cands:
+            if is_zh:
+                cause_str = " / ".join(
+                    f"`{c}` ({_ZH_CAUSE_LABELS[c]})" if c in _ZH_CAUSE_LABELS else f"`{c}`"
+                    for c in resolved_cands
+                )
+            else:
+                cause_str = " / ".join(f"`{c}`" for c in resolved_cands)
+        else:
+            cause_str = "—"
+        raw_side = (
             res["fault_side"]
             if resolved_cands and res["fault_side"] not in ("N/A", "Undetermined")
             else "—"
         )
-        basis_str = res["basis"] if resolved_cands else "—"
+        side_str = _ZH_SIDE_LABELS.get(raw_side, raw_side) if is_zh else raw_side
+        raw_basis = res["basis"] if resolved_cands else "—"
+        basis_str = _ZH_BASIS_LABELS.get(raw_basis, raw_basis) if is_zh else raw_basis
 
         s2_rows.append([
             _fmt_inline_code(short_name),
@@ -582,14 +704,20 @@ def render_markdown(diagnosis, project_dir=None):
 
     lines.extend(_format_markdown_table(s2_headers, s2_alignments, s2_rows))
     if any_disambiguated:
-        lines.extend([
-            "",
-            "*\\* `AST Hint *`: Runtime evidence was `ambiguous` between `unseeded_randomness` and `race_conditions` (outcomes varied under identical seed and test order); narrowed via static AST heuristic inspection.*",
-        ])
+        if is_zh:
+            lines.extend([
+                "",
+                "*\\* `AST 消歧 *`：运行时证据在 `unseeded_randomness`（未固定随机种子）与 `race_conditions`（并发时间竞态）之间存在歧义（相同种子和相同顺序下结果仍发生波动），已通过静态 AST 源码特征扫描进一步锁定。*",
+            ])
+        else:
+            lines.extend([
+                "",
+                "*\\* `AST Hint *`: Runtime evidence was `ambiguous` between `unseeded_randomness` and `race_conditions` (outcomes varied under identical seed and test order); narrowed via static AST heuristic inspection.*",
+            ])
 
     lines.extend([
         "",
-        "## 3. Diagnostic Details and Evidence Traceability",
+        "## 3. 诊断详情与证据溯源" if is_zh else "## 3. Diagnostic Details and Evidence Traceability",
         "",
     ])
 
@@ -598,7 +726,11 @@ def render_markdown(diagnosis, project_dir=None):
         if item["test"]["overall"]["verdict"] != "stable" or item["test"]["warnings"]
     ]
     if not non_stable:
-        lines.append("All analysed tests were observed as `stable` with no warnings.")
+        lines.append(
+            "所有被分析的测试均表现为 `stable`（稳定），且无告警信息。"
+            if is_zh
+            else "All analysed tests were observed as `stable` with no warnings."
+        )
     else:
         groups = []
         groups_by_key = {}
@@ -614,19 +746,28 @@ def render_markdown(diagnosis, project_dir=None):
                 lines.extend(["---", ""])
 
             if len(cands_key) == 1:
-                title_label = f"`{cands_key[0]}`"
+                c0 = cands_key[0]
+                title_label = (
+                    f"`{c0}`（{_ZH_CAUSE_LABELS.get(c0, c0)}）"
+                    if is_zh and c0 in _ZH_CAUSE_LABELS
+                    else f"`{c0}`"
+                )
             elif cands_key:
-                title_label = " / ".join(f"`{c}`" for c in cands_key) + " (ambiguous)"
+                title_label = " / ".join(f"`{c}`" for c in cands_key) + ("（存在歧义）" if is_zh else " (ambiguous)")
             else:
-                title_label = "Unclassified / Non-Flaky & Warnings"
+                title_label = "未分类 / 非波动测试与告警" if is_zh else "Unclassified / Non-Flaky & Warnings"
 
             group_sides = []
             for it in group_items:
                 fs = it["resolution"]["fault_side"]
                 if fs not in ("N/A", "Undetermined", "—") and fs not in group_sides:
-                    group_sides.append(fs)
+                    group_sides.append(_ZH_SIDE_LABELS.get(fs, fs) if is_zh else fs)
             side_heading = f" — {' / '.join(group_sides)}" if group_sides else ""
-            count_label = f"{len(group_items)} test{'s' if len(group_items) != 1 else ''}"
+            count_label = (
+                f"{len(group_items)} 个测试"
+                if is_zh
+                else f"{len(group_items)} test{'s' if len(group_items) != 1 else ''}"
+            )
             lines.append(f"### 3.{idx} {title_label}{side_heading} ({count_label})")
             lines.append("")
 
@@ -653,12 +794,19 @@ def render_markdown(diagnosis, project_dir=None):
             if len(distinct_reasons) > 1:
                 per_test_reason_needed = True
 
+            suspicion_prefix = "运行时怀疑根因" if is_zh else "Runtime Suspicion"
+            disamb_tag = (
+                "`ambiguous` -> 已由 AST 启发式提示消歧"
+                if is_zh
+                else "`ambiguous` -> narrowed by AST heuristic hint"
+            )
             if distinct_reasons and not per_test_reason_needed:
                 status, raw_cands, reason, is_disamb = distinct_reasons[0]
                 raw_cands_fmt = " / ".join(f"`{c}`" for c in raw_cands)
-                status_label = "`ambiguous` -> narrowed by AST heuristic hint" if is_disamb else f"`{status}`"
+                status_label = disamb_tag if is_disamb else f"`{status}`"
+                reason_txt = _translate_reason_zh(reason) if is_zh else reason
                 lines.append(
-                    f"> - **Runtime Suspicion ({status_label}):** {raw_cands_fmt} — {reason}"
+                    f"> - **{suspicion_prefix} ({status_label}):** {raw_cands_fmt} — {reason_txt}"
                 )
             elif distinct_reasons:
                 for it in group_items:
@@ -666,21 +814,28 @@ def render_markdown(diagnosis, project_dir=None):
                     for cause in t["suspected_causes"]:
                         raw_cands_fmt = " / ".join(f"`{c}`" for c in cause["candidates"])
                         status_label = (
-                            "`ambiguous` -> narrowed by AST heuristic hint"
+                            disamb_tag
                             if it["resolution"]["disambiguated"]
                             else f"`{cause['status']}`"
                         )
+                        reason_txt = _translate_reason_zh(cause["reason"]) if is_zh else cause["reason"]
                         lines.append(
-                            f"> - **Runtime Suspicion ({_fmt_inline_code(t['test_id'])}, {status_label}):** "
-                            f"{raw_cands_fmt} — {cause['reason']}"
+                            f"> - **{suspicion_prefix} ({_fmt_inline_code(t['test_id'])}, {status_label}):** "
+                            f"{raw_cands_fmt} — {reason_txt}"
                         )
             else:
-                lines.append("> - **Runtime Suspicion:** None assigned from runtime condition evidence.")
+                lines.append(
+                    "> - **运行时怀疑根因:** 未从运行时实验条件中分配根因。"
+                    if is_zh
+                    else "> - **Runtime Suspicion:** None assigned from runtime condition evidence."
+                )
             lines.append("")
 
-            s3_headers = [
-                "Test", "Stability", "Fail / Err", "Supporting Runs (Logs)", "Source Heuristic Hints",
-            ]
+            s3_headers = (
+                ["测试名称", "稳定性得分", "失败率 / 错误率", "支撑运行轮次（日志）", "源码 AST 启发式提示"]
+                if is_zh
+                else ["Test", "Stability", "Fail / Err", "Supporting Runs (Logs)", "Source Heuristic Hints"]
+            )
             s3_alignments = ["left", "center", "center", "left", "left"]
             s3_rows = []
             group_warnings = []
@@ -711,27 +866,29 @@ def render_markdown(diagnosis, project_dir=None):
 
                 combined_hints = list(r.get("compact_hints", [])) + list(r.get("conflicting_hints", []))
                 if combined_hints:
-                    hint_cell = _escape_table_cell("; ".join(combined_hints))
+                    translated = [_translate_hint_zh(h) if is_zh else h for h in combined_hints]
+                    hint_cell = _escape_table_cell("; ".join(translated))
                 elif t["suspected_causes"]:
                     if not s_info.get("available"):
-                        hint_cell = "Source not available for AST check"
+                        hint_cell = "源码不可用，无法执行 AST 检查" if is_zh else "Source not available for AST check"
                     else:
-                        hint_cell = "No matching AST pattern"
+                        hint_cell = "未匹配到已知 AST 缺陷模式" if is_zh else "No matching AST pattern"
                 elif ov["verdict"] == "flaky":
                     # Flaky test with no runtime cause assigned: surface any AST hints if source is available
                     unmatched = []
                     for cat_name, hits in (s_info.get("indicators") or {}).items():
                         for hit in hits:
-                            unmatched.append(
+                            raw_u = (
                                 f"AST hint (no runtime cause): `{hit['location']}` {hit['detail']} "
                                 f"(`{cat_name}`?, {hit['side']})"
                             )
+                            unmatched.append(_translate_hint_zh(raw_u) if is_zh else raw_u)
                     if unmatched:
                         hint_cell = _escape_table_cell("; ".join(unmatched))
                     elif not s_info.get("available"):
-                        hint_cell = "Source not available for AST check"
+                        hint_cell = "源码不可用，无法执行 AST 检查" if is_zh else "Source not available for AST check"
                     else:
-                        hint_cell = "No matching AST pattern"
+                        hint_cell = "未匹配到已知 AST 缺陷模式" if is_zh else "No matching AST pattern"
                 else:
                     hint_cell = "—"
 
@@ -743,13 +900,14 @@ def render_markdown(diagnosis, project_dir=None):
                     hint_cell,
                 ])
                 for w in t["warnings"]:
-                    group_warnings.append((t["test_id"], w))
+                    group_warnings.append((t["test_id"], _translate_warning_zh(w) if is_zh else w))
 
             lines.extend(_format_markdown_table(s3_headers, s3_alignments, s3_rows))
             if group_warnings:
                 lines.append("")
+                warn_label = "告警" if is_zh else "Warning"
                 for t_id, w_text in group_warnings:
-                    lines.append(f"- **Warning ({_fmt_inline_code(t_id)}):** {w_text}")
+                    lines.append(f"- **{warn_label} ({_fmt_inline_code(t_id)}):** {w_text}")
             lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"

@@ -65,6 +65,8 @@ git sparse-checkout set scenario docs
 
 # Run the installed CLI against the downloaded scenario:
 pytest-flaky-triage --project ./scenario --out ./out
+# Optional: pass `--lang zh` to generate a Simplified Chinese Markdown report:
+# pytest-flaky-triage --project ./scenario --out ./out --lang zh
 cat ./out/report.md
 ```
 
@@ -127,6 +129,7 @@ Each condition changes one factor and keeps the others fixed:
 | `--timeout SECONDS` | `60` | hard time limit for a single pytest run |
 | `--out DIR` | `out/` | output folder (rejects `/`, `$HOME`, symlinks, and folders containing `--project`) |
 | `--python PATH` | auto-detected | interpreter with `pytest` and the target project's dependencies installed |
+| `--lang LANG` | `en` | report language for `report.md`: `en` (English) or `zh` (Simplified Chinese) |
 | `--no-report` | off | stop after writing `results.csv` and `run_meta.csv` |
 
 ### Exit Codes

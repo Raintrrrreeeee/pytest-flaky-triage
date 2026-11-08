@@ -22,6 +22,12 @@ def main(argv=None):
         default=None,
         help="Optional target pytest project directory for AST source heuristics",
     )
+    parser.add_argument(
+        "--lang",
+        choices=("en", "zh"),
+        default="en",
+        help="Report language: 'en' (English, default) or 'zh' (Simplified Chinese)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -33,7 +39,7 @@ def main(argv=None):
         print(f"report: invalid diagnosis input: {exc}", file=sys.stderr)
         return 4
 
-    markdown = render_markdown(diagnosis, project_dir=args.project)
+    markdown = render_markdown(diagnosis, project_dir=args.project, lang=args.lang)
     temporary = None
     diag_tmp = None
     try:

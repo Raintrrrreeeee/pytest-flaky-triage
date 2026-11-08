@@ -64,7 +64,7 @@ cd flaky-demo
 git sparse-checkout set scenario docs
 
 # 使用已安装的 CLI 工具检测下载好的 scenario 靶场（约 10 秒）：
-pytest-flaky-triage --project ./scenario --out ./out
+pytest-flaky-triage --project ./scenario --out ./out --lang zh
 cat ./out/report.md
 ```
 
@@ -82,9 +82,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 
-# 1. 一键运行内置的 18 个测试演示靶场（约 10 秒跑完 42 轮矩阵）：
-pytest-flaky-triage --demo
-# （或者运行：bash scripts/demo.sh）
+# 1. 一键运行内置的 18 个测试演示靶场（约 10 秒跑完 42 轮矩阵，可通过 --lang zh 输出中文报告）：
+pytest-flaky-triage --demo --lang zh
+# （或者运行：bash scripts/demo.sh --lang zh）
 
 # 2. 查看生成的 Markdown 诊断报告：
 cat out/report.md
@@ -127,6 +127,7 @@ scripts/detect.sh --project PATH [options]
 | `--timeout SECONDS` | `60` | 单轮 `pytest` 运行的最大超时秒数 |
 | `--out DIR` | `out/` | 诊断产物输出目录（自动拦截 `/`、`$HOME`、软链接及包含目标项目的危险路径） |
 | `--python PATH` | 自动探测 | 指定运行目标项目的 Python 解释器路径 |
+| `--lang LANG` | `en` | 诊断报告 `report.md` 的输出语言：`en`（英文，默认）或 `zh`（简体中文，也可直接传给 `python -m report ... --lang zh`） |
 | `--no-report` | 关闭 | 仅生成 `results.csv` 和 `run_meta.csv`，不执行后续分析与报告生成 |
 
 ### 退出状态码（Exit Codes）

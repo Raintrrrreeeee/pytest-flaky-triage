@@ -1086,3 +1086,29 @@ def test_extended_ast_heuristics_fixtures_code_side_shared_and_seed_suppression(
     )
     assert info_pool["indicators"]["race_conditions"][0]["side"] == "Code Side"
 
+
+def test_chinese_report_rendering_and_cli(tmp_path):
+    """Verify --lang zh generates a localized Chinese Markdown report."""
+    scenario_dir = Path(__file__).resolve().parents[1] / "scenario"
+    diagnosis = _sample_diagnosis()
+    diagnosis["tests"][1]["test_id"] = "tests/test_cart.py::test_get_daily_quote"
+    md_zh = render_markdown(diagnosis, project_dir=scenario_dir, lang="zh")
+    assert "# 测试稳定性诊断报告 (Test-Stability Triage Report)" in md_zh
+    assert "## 1. 概览摘要" in md_zh
+    assert "## 2. 测试诊断汇总表" in md_zh
+    assert "## 3. 诊断详情与证据溯源" in md_zh
+    assert "未固定随机种子" in md_zh
+    assert "业务侧 (Code Side)" in md_zh
+    assert "AST 消歧 *" in md_zh
+
+    diag_path = tmp_path / "diagnosis.json"
+    out_dir = tmp_path / "out_zh"
+    diag_path.write_text(json.dumps(diagnosis), encoding="utf-8")
+    rc = main([str(diag_path), str(out_dir), "--project", str(scenario_dir), "--lang", "zh"])
+    assert rc == 0
+    written = (out_dir / "report.md").read_text(encoding="utf-8")
+    assert "## 2. 测试诊断汇总表" in written
+
+
+
+
