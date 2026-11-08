@@ -139,3 +139,128 @@ def test_help_exits_0():
     result = detect("--help")
     assert result.returncode == 0
     assert "Usage: scripts/detect.sh" in result.stdout
+
+
+def test_equals_syntax_and_report_only_mode(tmp_path):
+    out_dir = tmp_path / "eq_out"
+    res = detect(
+        f"--project={GOOD_PROJECT}",
+        f"--out={out_dir}",
+        "--repeats=2",
+        "--hash-seeds=",
+        "--orders=0",
+        "--isolated=0",
+        "--lang=en",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "# Test-Stability Triage Report" in (out_dir / "report.md").read_text(encoding="utf-8")
+
+    # Now switch language to Chinese with --report-only without re-running pytest
+    res_zh = detect(
+        f"--project={GOOD_PROJECT}",
+        f"--out={out_dir}",
+        "--lang=zh",
+        "--report-only",
+    )
+    assert res_zh.returncode == 0, res_zh.stderr
+    assert "# 测试稳定性诊断报告" in (out_dir / "report.md").read_text(encoding="utf-8")
+
+    # --report-only on an empty output directory exits 6
+    empty_out = tmp_path / "empty_out"
+    res_empty = detect(f"--project={GOOD_PROJECT}", f"--out={empty_out}", "--report-only")
+    assert res_empty.returncode == 6
+
+
+def test_sparse_checkout_wrapper_dir_hints_scenario_subfolder(tmp_path):
+    wrapper = tmp_path / "flaky-demo"
+    (wrapper / "scenario" / "tests").mkdir(parents=True)
+    (wrapper / "scenario" / "src").mkdir(parents=True)
+    (wrapper / "scenario" / "src" / "ecommerce.py").write_text("VAL = 1\n", encoding="utf-8")
+    (wrapper / "scenario" / "tests" / "test_sample.py").write_text(
+        "import ecommerce\ndef test_ok():\n    assert ecommerce.VAL == 1\n", encoding="utf-8"
+    )
+    res = detect("--project", str(wrapper), "--out", str(tmp_path / "out"), "--no-report")
+    assert res.returncode == 4
+    assert "--project" in res.stderr and "scenario" in res.stderr
+
+
+def test_installed_cli_branding_and_demo_mode(tmp_path):
+    import sys
+
+    env_PYTHONPATH = str(ROOT / "src")
+    proc_help = subprocess.run(
+        [sys.executable, "-m", "flaky_triage.cli", "--help"],
+        env={**subprocess.os.environ, "PYTHONPATH": env_PYTHONPATH},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc_help.returncode == 0
+    assert "Usage: pytest-flaky-triage" in proc_help.stdout
+
+    # Simulate installed package mode (--demo when scenario is not in cwd prints helpful download instructions)
+    runtime_demo = ROOT / "src" / "flaky_triage" / "runtime" / "demo.sh"
+    assert runtime_demo.is_file()
+    proc_missing_demo = subprocess.run(
+        ["bash", str(runtime_demo)],
+        cwd=str(tmp_path),
+        env={**subprocess.os.environ, "FLAKY_INSTALLED_PACKAGE": "1"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert proc_missing_demo.returncode == 2
+    assert "git sparse-checkout" in proc_missing_demo.stderr
+
+    # When ./scenario exists in cwd, installed --demo runs against ./scenario and writes ./out
+    demo_workspace = tmp_path / "demo_ws"
+    (demo_workspace / "scenario" / "tests").mkdir(parents=True)
+    (demo_workspace / "scenario" / "tests" / "test_tiny.py").write_text(
+        "def test_pass():\n    assert True\n", encoding="utf-8"
+    )
+    proc_run_demo = subprocess.run(
+        [
+            "bash",
+            str(runtime_demo),
+            "--repeats=2",
+            "--hash-seeds=",
+            "--orders=0",
+            "--isolated=0",
+        ],
+        cwd=str(demo_workspace),
+        env={
+            **subprocess.os.environ,
+            "FLAKY_INSTALLED_PACKAGE": "1",
+            "FLAKY_TOOL_PYTHON": sys.executable,
+            "PYTHONPATH": env_PYTHONPATH,
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc_run_demo.returncode == 0, proc_run_demo.stderr
+    assert (demo_workspace / "out" / "report.md").is_file()
+
+    # Running with --out inside --project (e.g. cd proj && pytest-flaky-triage --project .)
+    # ignores the output folder during pytest collection
+    proj_dir = demo_workspace / "scenario"
+    in_proj_out = proj_dir / "out"
+    in_proj_out.mkdir(parents=True, exist_ok=True)
+    (in_proj_out / "test_should_be_ignored.py").write_text(
+        "def test_fail():\n    assert False\n", encoding="utf-8"
+    )
+    res_in_proj = detect(
+        "--project",
+        str(proj_dir),
+        "--out",
+        str(in_proj_out),
+        "--repeats=2",
+        "--hash-seeds=",
+        "--orders=0",
+        "--isolated=0",
+    )
+    assert res_in_proj.returncode == 0, res_in_proj.stderr
+    collected_ids = (in_proj_out / "collected.txt").read_text(encoding="utf-8")
+    assert "test_should_be_ignored" not in collected_ids
+
+

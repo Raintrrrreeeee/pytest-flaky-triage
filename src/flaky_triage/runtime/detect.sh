@@ -43,11 +43,14 @@ PYTHON=""
 TARGET_SUBPATH=""
 KEYWORD_EXPR=""
 REPORT=yes
+REPORT_ONLY=no
 REPORT_LANG="en"
+CLI_USAGE_NAME=${FLAKY_CLI_NAME:-scripts/detect.sh}
+CLI_ERR_NAME=${FLAKY_CLI_NAME:-detect.sh}
 
 usage() {
     cat <<EOF
-Usage: scripts/detect.sh --project PATH [options]
+Usage: $CLI_USAGE_NAME --project PATH [options]
 
 Runs the pytest suite in PATH under several conditions and writes
 per-test outcomes to OUT/results.csv.
@@ -68,17 +71,21 @@ Options:
   --out DIR                  output folder (default out/)
   --python PATH              Python interpreter with pytest installed for target
   --lang LANG                report language: 'en' or 'zh' (default $REPORT_LANG)
+  --report-only              regenerate report.md from existing output without
+                             re-running pytest
   --no-report                stop after writing results.csv
   -h, --help                 show this help
 EOF
 }
 
 die() {
-    echo "detect.sh: error: $1" >&2
+    [[ -t 2 ]] && printf '\r\033[K' >&2
+    echo "$CLI_ERR_NAME: error: $1" >&2
     exit "${2:-$E_USAGE}"
 }
 
 say() {
+    [[ -t 2 ]] && printf '\r\033[K' >&2
     echo "[detect] $*" >&2
 }
 
@@ -92,6 +99,14 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help) usage; exit 0 ;;
         --no-report) REPORT=no; shift; continue ;;
+        --report-only) REPORT_ONLY=yes; shift; continue ;;
+        --*=*)
+            opt_name="${1%%=*}"
+            opt_val="${1#*=}"
+            shift
+            set -- "$opt_name" "$opt_val" "$@"
+            continue
+            ;;
         --project|--target|-k|--repeats|--hash-seeds|--orders|--isolated|--isolated-scope|--timeout|--out|--python|--lang)
             [[ $# -ge 2 ]] || die "$1 needs a value (see --help)"
             ;;
@@ -130,6 +145,9 @@ case $REPORT_LANG in
     en|zh) ;;
     *) die "--lang must be 'en' or 'zh' (got '$REPORT_LANG')" ;;
 esac
+if [[ $REPORT == no && $REPORT_ONLY == yes ]]; then
+    die "--no-report and --report-only cannot be used together"
+fi
 
 REPEATS=$((10#$REPEATS)); ORDERS=$((10#$ORDERS))
 ISOLATED=$((10#$ISOLATED)); TIMEOUT=$((10#$TIMEOUT))
@@ -179,6 +197,50 @@ else
 fi
 [[ -n $TOOL_PYTHON && -x $TOOL_PYTHON ]] || die "no Python interpreter found for tool; create .venv as described in README.md" "$E_ENV"
 
+TOOL_PYTHONPATH="$TOOL_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+run_analysis_and_report() {
+    if [[ $REPORT_ONLY == yes && ! -f $OUT_DIR/diagnosis.json && ! -f $OUT_DIR/results.csv ]]; then
+        die "--report-only requires an existing $OUT_REL/diagnosis.json or $OUT_REL/results.csv" "$E_REPORT"
+    fi
+    if [[ $REPORT_ONLY != yes || ! -f $OUT_DIR/diagnosis.json ]]; then
+        if [[ ! -d $TOOL_ROOT/src/analysis && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
+            say "analysis stage not in the repository yet; stopping after results.csv"
+            exit 0
+        fi
+        local analysis_rc=0
+        PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m analysis "$OUT_DIR/results.csv" "$OUT_DIR" || analysis_rc=$?
+        case $analysis_rc in
+            0) say "diagnosis: $OUT_REL/diagnosis.json" ;;
+            2) die "analysis stage rejected its arguments (exit 2)" "$E_REPORT" ;;
+            3) die "analysis stage could not read results.csv or run_meta.csv (exit 3)" "$E_REPORT" ;;
+            4) die "analysis stage found invalid or inconsistent data in results.csv (exit 4)" "$E_REPORT" ;;
+            5) die "analysis stage could not write diagnosis.json (exit 5)" "$E_REPORT" ;;
+            *) die "analysis stage failed with exit code $analysis_rc" "$E_REPORT" ;;
+        esac
+    fi
+
+    if [[ ! -d $TOOL_ROOT/src/report && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
+        say "report stage not in the repository yet; stopping after diagnosis.json"
+        exit 0
+    fi
+    local report_rc=0
+    PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m report "$OUT_DIR/diagnosis.json" "$OUT_DIR" --project "$PROJECT" --lang "$REPORT_LANG" || report_rc=$?
+    case $report_rc in
+        0) say "report:    $OUT_REL/report.md" ;;
+        2) die "report stage rejected its arguments (exit 2)" "$E_REPORT" ;;
+        3) die "report stage could not read diagnosis.json (exit 3)" "$E_REPORT" ;;
+        4) die "report stage found invalid or inconsistent data in diagnosis.json (exit 4)" "$E_REPORT" ;;
+        5) die "report stage could not write report.md (exit 5)" "$E_REPORT" ;;
+        *) die "report stage failed with exit code $report_rc" "$E_REPORT" ;;
+    esac
+}
+
+if [[ $REPORT_ONLY == yes ]]; then
+    run_analysis_and_report
+    exit 0
+fi
+
 # Resolve TARGET_PYTHON (runs pytest on the target project)
 TARGET_PYTHON=""
 if [[ -n $PYTHON ]]; then
@@ -205,8 +267,6 @@ if [[ -d $PROJECT/src ]]; then
     TARGET_PYTHONPATH="$TARGET_PYTHONPATH:$PROJECT/src"
 fi
 TARGET_PYTHONPATH="$TARGET_PYTHONPATH:$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
-
-TOOL_PYTHONPATH="$TOOL_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # Clean up temporary per-run folders and exit immediately on Ctrl+C / SIGTERM
 CURRENT_RUN_TMP=""
@@ -255,6 +315,9 @@ PYTEST_OPTS=(
     --color=no
     --capture=fd
 )
+if [[ $OUT_DIR == "$PROJECT"/* ]]; then
+    PYTEST_OPTS+=(--ignore="$OUT_DIR")
+fi
 
 EXTRA_COLLECT_ARGS=()
 [[ -n $KEYWORD_EXPR ]] && EXTRA_COLLECT_ARGS+=(-k "$KEYWORD_EXPR")
@@ -278,6 +341,9 @@ run_one() {
     local condition=$1 value=$2 hash_seed=$3 expected=$4 order_file=${5:-}
     shift $(( $# >= 5 ? 5 : 4 ))
     RUN_ID=$((RUN_ID + 1))
+    if [[ -t 2 ]]; then
+        printf '\r[detect] running %d/%d (%s %s)...\033[K' "$RUN_ID" "${N_RUNS:-0}" "$condition" "$value" >&2
+    fi
     local log_rel
     if [[ ${N_RUNS:-0} -ge 1000 ]]; then
         log_rel=logs/run_$(printf '%05d' "$RUN_ID").log
@@ -386,10 +452,17 @@ collect_rc=0
 
 case $collect_rc in
     0) ;;
-    5) rm -f "$COLLECT_TMP"; die "pytest found no tests in $PROJECT" "$E_COLLECT" ;;
+    5) rm -f "$COLLECT_TMP"
+       if [[ -d $PROJECT/scenario/tests ]]; then
+           say "hint: found benchmark suite at '$PROJECT/scenario' — try: --project $PROJECT/scenario"
+       fi
+       die "pytest found no tests in $PROJECT" "$E_COLLECT" ;;
     124) rm -f "$COLLECT_TMP"; die "pytest collection timed out after ${TIMEOUT}s in $PROJECT" "$E_COLLECT" ;;
     *) rm -f "$COLLECT_TMP"
        tail -n 15 "$COLLECT_LOG" >&2
+       if [[ -d $PROJECT/scenario/tests ]]; then
+           say "hint: found benchmark suite at '$PROJECT/scenario' — try: --project $PROJECT/scenario"
+       fi
        die "pytest could not collect the project (exit code $collect_rc); full output in $OUT_REL/collect.log" "$E_COLLECT" ;;
 esac
 
@@ -502,32 +575,4 @@ if [[ $REPORT == no ]]; then
     exit 0
 fi
 
-if [[ ! -d $TOOL_ROOT/src/analysis && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
-    say "analysis stage not in the repository yet; stopping after results.csv"
-    exit 0
-fi
-analysis_rc=0
-PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m analysis "$OUT_DIR/results.csv" "$OUT_DIR" || analysis_rc=$?
-case $analysis_rc in
-    0) say "diagnosis: $OUT_REL/diagnosis.json" ;;
-    2) die "analysis stage rejected its arguments (exit 2)" "$E_REPORT" ;;
-    3) die "analysis stage could not read results.csv or run_meta.csv (exit 3)" "$E_REPORT" ;;
-    4) die "analysis stage found invalid or inconsistent data in results.csv (exit 4)" "$E_REPORT" ;;
-    5) die "analysis stage could not write diagnosis.json (exit 5)" "$E_REPORT" ;;
-    *) die "analysis stage failed with exit code $analysis_rc" "$E_REPORT" ;;
-esac
-
-if [[ ! -d $TOOL_ROOT/src/report && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
-    say "report stage not in the repository yet; stopping after diagnosis.json"
-    exit 0
-fi
-report_rc=0
-PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m report "$OUT_DIR/diagnosis.json" "$OUT_DIR" --project "$PROJECT" --lang "$REPORT_LANG" || report_rc=$?
-case $report_rc in
-    0) say "report:    $OUT_REL/report.md" ;;
-    2) die "report stage rejected its arguments (exit 2)" "$E_REPORT" ;;
-    3) die "report stage could not read diagnosis.json (exit 3)" "$E_REPORT" ;;
-    4) die "report stage found invalid or inconsistent data in diagnosis.json (exit 4)" "$E_REPORT" ;;
-    5) die "report stage could not write report.md (exit 5)" "$E_REPORT" ;;
-    *) die "report stage failed with exit code $report_rc" "$E_REPORT" ;;
-esac
+run_analysis_and_report

@@ -5,6 +5,7 @@ import json
 import math
 from pathlib import Path
 import re
+import unicodedata
 
 from .heuristics import disambiguate_causes, inspect_test_source
 
@@ -427,21 +428,31 @@ def _fmt_run_links(run_ids, runs_by_id, max_shown=4, evidence=None):
     return f"{', '.join(head_parts)}, ..., {', '.join(tail_parts)} ({total} runs)"
 
 
+def _display_width(text):
+    """Return monospace terminal column width (East Asian Wide/Fullwidth = 2 cols)."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
 def _format_markdown_table(headers, alignments, rows):
     """Format a Markdown table with padded column widths for clean visual alignment."""
     widths = [
-        max(len(headers[i]), *(len(r[i]) for r in rows), 3) if rows else max(len(headers[i]), 3)
+        max(_display_width(headers[i]), *(_display_width(r[i]) for r in rows), 3)
+        if rows
+        else max(_display_width(headers[i]), 3)
         for i in range(len(headers))
     ]
 
     def pad_cell(text, width, align):
+        adj_width = max(len(text), width - (_display_width(text) - len(text)))
         if align == "center":
-            return text.center(width)
+            return text.center(adj_width)
         if align == "right":
-            return text.rjust(width)
-        return text.ljust(width)
+            return text.rjust(adj_width)
+        return text.ljust(adj_width)
 
-    header_line = "| " + " | ".join(headers[i].ljust(widths[i]) for i in range(len(headers))) + " |"
+    header_line = (
+        "| " + " | ".join(pad_cell(headers[i], widths[i], "left") for i in range(len(headers))) + " |"
+    )
     sep_cells = []
     for i, align in enumerate(alignments):
         w = widths[i]
@@ -507,13 +518,18 @@ _ZH_SIDE_LABELS = {
     "Test Side": "测试侧 (Test Side)",
     "Code Side": "业务侧 (Code Side)",
     "Both": "双侧 (Both)",
+    "Test Side / Code Side": "双侧 (Test / Code Side)",
+    "Code Side / Test Side": "双侧 (Code / Test Side)",
 }
 
 _ZH_BASIS_LABELS = {
     "Runtime+AST": "运行时+AST",
     "AST Hint *": "AST 消歧 *",
     "Runtime Only": "仅运行时",
-    "Runtime (Conflict)": "运行时 (AST冲突)",
+    "Runtime": "仅运行时",
+    "Ambiguous": "存在歧义",
+    "Runtime (Conflict)": "运行时 (AST 冲突)",
+    "Runtime (AST conflict)": "运行时 (AST 冲突)",
 }
 
 
@@ -545,19 +561,28 @@ def _translate_reason_zh(reason):
 
 def _translate_hint_zh(hint):
     text = hint
+    text = text.replace("Conflicting AST hint:", "冲突的 AST 提示：")
+    text = text.replace("Conflicting hint:", "冲突的 AST 提示：")
+    text = text.replace("AST hint (no runtime cause):", "AST 提示（无运行时归因）：")
+    text = text.replace(", runtime suggests ", "，但运行时证据指向 ")
+    text = text.replace("?, Test Side)", "?，测试侧)")
+    text = text.replace("?, Code Side)", "?，业务侧)")
     text = text.replace("unsorted `join(...)` on unordered `set` from", "对来自以下位置的无序 `set` 执行了未排序的 `join(...)`：")
+    text = text.replace(
+        "unsorted string `join(...)` (verify argument ordering is deterministic)",
+        "对字符串执行了未排序的 `join(...)`（请确认参数顺序是否确定）",
+    )
     text = text.replace("iterates or converts unordered `set` without sorting", "对无序 `set` 进行了未排序的遍历或转换")
     text = text.replace("accesses/mutates shared module-level object", "读写/修改了模块级共享对象")
     text = text.replace("mutates shared module-level variable", "通过 `global` 修改了模块级共享变量")
     text = text.replace("accesses/mutates shared module-level state", "读写/修改了业务模块级共享状态")
+    text = text.replace("accesses/mutates shared class-level attribute", "读写/修改了共享类属性")
     text = text.replace("(declared at ", "（声明于 ")
     text = text.replace(" without a fixed seed", " 且未固定随机种子")
     text = text.replace("calls ", "调用了 ")
     text = text.replace("uses unsynchronized concurrency/timing primitives", "使用了未同步的并发/计时原语")
-    text = text.replace("AST hint (no runtime cause):", "AST 提示（无运行时归因）：")
-    text = text.replace("Conflicting AST hint:", "冲突的 AST 提示：")
-    if "（声明于 " in text and text.endswith(")"):
-        text = text[:-1] + "）"
+    text = text.replace("uses timing sleep", "使用了固定时长等待")
+    text = re.sub(r"（声明于 (`[^`]+`)\)", r"（声明于 \1）", text)
     return text
 
 
@@ -760,8 +785,10 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
             group_sides = []
             for it in group_items:
                 fs = it["resolution"]["fault_side"]
-                if fs not in ("N/A", "Undetermined", "—") and fs not in group_sides:
-                    group_sides.append(_ZH_SIDE_LABELS.get(fs, fs) if is_zh else fs)
+                if fs not in ("N/A", "Undetermined", "—"):
+                    side_label = _ZH_SIDE_LABELS.get(fs, fs) if is_zh else fs
+                    if side_label not in group_sides:
+                        group_sides.append(side_label)
             side_heading = f" — {' / '.join(group_sides)}" if group_sides else ""
             count_label = (
                 f"{len(group_items)} 个测试"

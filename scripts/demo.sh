@@ -10,13 +10,32 @@
 # Extra arguments are passed to detect.sh, e.g. scripts/demo.sh --repeats 30
 set -euo pipefail
 
-TOOL_ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-SCENARIO=$TOOL_ROOT/scenario
-ANSWER_KEY=$TOOL_ROOT/docs/scenario.md
-OUT_DIR=$TOOL_ROOT/out
+SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+TOOL_ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd -P)
+DETECT_SH="$SCRIPT_DIR/detect.sh"
+CWD=$(pwd -P)
+if [[ ${FLAKY_INSTALLED_PACKAGE:-0} != 1 && -d $TOOL_ROOT/scenario ]]; then
+    SCENARIO=$TOOL_ROOT/scenario
+    ANSWER_KEY=$TOOL_ROOT/docs/scenario.md
+    OUT_DIR=$TOOL_ROOT/out
+elif [[ -d $CWD/scenario ]]; then
+    SCENARIO=$CWD/scenario
+    ANSWER_KEY=$CWD/docs/scenario.md
+    OUT_DIR=$CWD/out
+elif [[ -f $CWD/tests/test_cart.py && -d $CWD/src/ecommerce ]]; then
+    SCENARIO=$CWD
+    ANSWER_KEY=$(cd -P "$CWD/.." && pwd -P)/docs/scenario.md
+    OUT_DIR=$CWD/out
+else
+    SCENARIO=$TOOL_ROOT/scenario
+    ANSWER_KEY=$TOOL_ROOT/docs/scenario.md
+    OUT_DIR=$TOOL_ROOT/out
+fi
 PYTHON=""
 
-if [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
+if [[ -n ${FLAKY_TOOL_PYTHON:-} && -x ${FLAKY_TOOL_PYTHON:-} ]]; then
+    PYTHON=$FLAKY_TOOL_PYTHON
+elif [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
     PYTHON=$TOOL_ROOT/.venv/bin/python
 else
     PYTHON=$(command -v python3 || true)
@@ -35,24 +54,39 @@ args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
     case ${args[i]} in
         -h|--help)
-            exec "$TOOL_ROOT/scripts/detect.sh" --help
+            exec "$DETECT_SH" --help
             ;;
         --out)
             if [[ $((i + 1)) -lt ${#args[@]} ]]; then
                 OUT_DIR=${args[i + 1]}
             fi
             ;;
+        --out=*)
+            OUT_DIR=${args[i]#--out=}
+            ;;
         --python)
             if [[ $((i + 1)) -lt ${#args[@]} ]]; then
                 PYTHON=${args[i + 1]}
             fi
             ;;
+        --python=*)
+            PYTHON=${args[i]#--python=}
+            ;;
     esac
 done
 
 [[ -n $PYTHON && -x $PYTHON ]] || die "Python interpreter not found; run the setup commands in README.md first" 3
-[[ -d $SCENARIO ]] || die "scenario folder not found at $SCENARIO" 2
-[[ -f $ANSWER_KEY ]] || die "answer key not found at $ANSWER_KEY" 2
+if [[ ! -d $SCENARIO ]]; then
+    cat >&2 <<'EOF'
+demo.sh: error: scenario/ folder not found in current directory.
+To download the optional benchmark scenario on demand, run:
+  git clone --depth 1 --filter=blob:none --sparse https://github.com/Raintrrrreeeee/pytest-flaky-triage.git flaky-demo
+  cd flaky-demo
+  git sparse-checkout set --no-cone /scenario /docs
+  pytest-flaky-triage --demo
+EOF
+    exit 2
+fi
 
 # ------------------------------------------------- 1. the manual baseline
 
@@ -65,9 +99,9 @@ echo "  Which failures are real bugs, which are flaky, and why? Plain pytest can
 
 # --------------------------------------------------- 2. the condition matrix
 
-heading "Running scripts/detect.sh on scenario/"
+heading "Running detect.sh on scenario/"
 detect_rc=0
-"$TOOL_ROOT/scripts/detect.sh" --project "$SCENARIO" --out "$OUT_DIR" "$@" || detect_rc=$?
+"$DETECT_SH" --project "$SCENARIO" --out "$OUT_DIR" "$@" || detect_rc=$?
 [[ $detect_rc -eq 0 ]] || die "detect.sh failed with exit code $detect_rc" "$detect_rc"
 OUT_DIR=$(cd -P "$OUT_DIR" && pwd -P)
 if [[ $OUT_DIR == "$TOOL_ROOT"/* ]]; then
@@ -78,46 +112,48 @@ fi
 
 # ---------------------------------------- 3. pass counts vs the answer key
 
-heading "Passes per condition (from $OUT_REL/results.csv) vs the answer key (docs/scenario.md)"
-awk -F',' '
-    FNR == NR {
-        if ($0 ~ /^\| `test_/) {
-            n = split($0, part, "`")
-            expected[part[2]] = part[n - 1]
-        }
-        next
-    }
-    FNR == 1 { next }
-    {
-        line = $0
-        outcome = $NF
-        sub(/,[^,]*$/, "", line)
-        sub(/^[^,]*,[^,]*,("[^"]*"|[^,]*),[^,]*,/, "", line)
-        gsub(/^"|"$/, "", line)
-        gsub(/""/, "\"", line)
-        name = line
-        sub(/.*::/, "", name)
-        condition = $2
-        if (!(name in seen)) { seen[name] = 1; order[++n_tests] = name }
-        total[name, condition]++
-        if (outcome == "passed") passed[name, condition]++
-    }
-    END {
-        printf "  %-46s %-15s %9s %9s %9s %9s\n", "test", "expected", "repeat", "hashseed", "order", "isolated"
-        split("repeat hashseed order isolated", cond, " ")
-        for (i = 1; i <= n_tests; i++) {
-            name = order[i]
-            want = (name in expected) ? expected[name] : "(not in key)"
-            printf "  %-46s %-15s", name, want
-            for (c = 1; c <= 4; c++) {
-                key = name SUBSEP cond[c]
-                cell = (key in total) ? (passed[key] + 0) "/" total[key] : "-"
-                printf " %9s", cell
+if [[ -f $ANSWER_KEY ]]; then
+    heading "Passes per condition (from $OUT_REL/results.csv) vs the answer key (docs/scenario.md)"
+    awk -F',' '
+        FNR == NR {
+            if ($0 ~ /^\| `test_/) {
+                n = split($0, part, "`")
+                expected[part[2]] = part[n - 1]
             }
-            printf "\n"
+            next
         }
-    }
-' "$ANSWER_KEY" "$OUT_DIR/results.csv"
+        FNR == 1 { next }
+        {
+            line = $0
+            outcome = $NF
+            sub(/,[^,]*$/, "", line)
+            sub(/^[^,]*,[^,]*,("[^"]*"|[^,]*),[^,]*,/, "", line)
+            gsub(/^"|"$/, "", line)
+            gsub(/""/, "\"", line)
+            name = line
+            sub(/.*::/, "", name)
+            condition = $2
+            if (!(name in seen)) { seen[name] = 1; order[++n_tests] = name }
+            total[name, condition]++
+            if (outcome == "passed") passed[name, condition]++
+        }
+        END {
+            printf "  %-46s %-15s %9s %9s %9s %9s\n", "test", "expected", "repeat", "hashseed", "order", "isolated"
+            split("repeat hashseed order isolated", cond, " ")
+            for (i = 1; i <= n_tests; i++) {
+                name = order[i]
+                want = (name in expected) ? expected[name] : "(not in key)"
+                printf "  %-46s %-15s", name, want
+                for (c = 1; c <= 4; c++) {
+                    key = name SUBSEP cond[c]
+                    cell = (key in total) ? (passed[key] + 0) "/" total[key] : "-"
+                    printf " %9s", cell
+                }
+                printf "\n"
+            }
+        }
+    ' "$ANSWER_KEY" "$OUT_DIR/results.csv"
+fi
 
 # ----------------------------------------------------------- 4. where it is
 

@@ -1,6 +1,7 @@
 # pytest-flaky-triage
 
 [![CI](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Raintrrrreeeee/pytest-flaky-triage)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/releases)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![pytest >= 7.4](https://img.shields.io/badge/pytest-%3E%3D7.4-0A9EDC.svg)](https://docs.pytest.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#)
@@ -108,13 +109,14 @@ If you installed the CLI via `pip install` above and want to try it on the built
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/Raintrrrreeeee/pytest-flaky-triage.git flaky-demo
 cd flaky-demo
-git sparse-checkout set scenario docs
+git sparse-checkout set --no-cone /scenario /docs
 
-# Run the installed CLI against the downloaded scenario:
+# Run the installed CLI against the downloaded scenario (or simply run `pytest-flaky-triage --demo`):
 pytest-flaky-triage --project ./scenario --out ./out
-# Optional: pass `--lang zh` to generate a Simplified Chinese Markdown report:
-# pytest-flaky-triage --project ./scenario --out ./out --lang zh
 cat ./out/report.md
+
+# Optional: switch report.md to Simplified Chinese instantly without re-running pytest:
+pytest-flaky-triage --project ./scenario --out ./out --lang zh --report-only
 ```
 
 ---
@@ -177,6 +179,7 @@ Each condition changes one factor and keeps the others fixed:
 | `--out DIR` | `out/` | output folder (rejects `/`, `$HOME`, symlinks, and folders containing `--project`) |
 | `--python PATH` | auto-detected | interpreter with `pytest` and the target project's dependencies installed |
 | `--lang LANG` | `en` | report language for `report.md`: `en` (English) or `zh` (Simplified Chinese) |
+| `--report-only` | off | regenerate `report.md` from existing `out/` results without re-running `pytest` |
 | `--no-report` | off | stop after writing `results.csv` and `run_meta.csv` |
 
 ### Exit Codes
