@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/Raintrrrreeeee/pytest-flaky-triage)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/releases)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![pytest >= 7.4](https://img.shields.io/badge/pytest-%3E%3D7.4-0A9EDC.svg)](https://docs.pytest.org/)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 **English** | [简体中文](README.zh-CN.md)
@@ -58,11 +58,11 @@ Each diagnostic section further pinpoints the **polluting predecessor test** and
 
 ## Key Features
 
-### Stage 1 — Controlled 4-Dimension Perturbation Runner (`scripts/detect.sh` & `flaky_plugin.py`)
+### Stage 1 — Controlled 4-Dimension Perturbation Runner (`flaky_triage.runner`, `scripts/detect.sh` & `flaky_plugin.py`)
 - **Single-Factor Experimental Matrix**: Evaluates tests across four orthogonal conditions (`repeat`, `hashseed`, `order`, and `isolated`), holding all other variables fixed so each perturbation isolates a distinct class of flakiness.
-- **Sideband Pytest Hook Plugin**: Captures per-test outcomes (`setup` / `call` / `teardown`) directly from pytest hooks into a structured sideband event stream, remaining accurate regardless of project `pytest.ini` flags (`-q`, custom progress bars, multiline failure tracebacks, or parameterized IDs containing spaces and brackets), with a hardened AWK log-parser fallback (`parse_log.awk`).
+- **Sideband Pytest Hook Plugin**: Captures per-test outcomes (`setup` / `call` / `teardown`) directly from pytest hooks into a structured sideband event stream, remaining accurate regardless of project `pytest.ini` flags (`-q`, custom progress bars, multiline failure tracebacks, or parameterized IDs containing spaces and brackets), with a hardened AWK/regex log-parser fallback.
 - **In-Memory `O(N)` Reordering & Plugin Neutralization**: Reorders tests in-place via `pytest_collection_modifyitems` and automatically disables conflicting third-party plugins (`pytest-randomly`, `pytest-xdist`, `pytest-sugar`, `pytest-cov`, `pytest-rerunfailures`, `pytest-order`) during matrix runs.
-- **Process-Group Timeout & Hang Protection**: Executes every run in an isolated process group with `stdin` closed (`/dev/null`) and `SIGTERM -> SIGKILL` escalation (exit code `124`), cleanly terminating hung background threads or child processes on both macOS and Linux.
+- **Cross-Platform Process-Group Timeout & Hang Protection**: Executes every run in an isolated process group with `stdin` closed and process-tree termination on timeout (exit code `124`), cleanly terminating hung background threads or child processes on **macOS, Linux, and Windows (PowerShell / CMD / Git Bash)**.
 - **Large-Suite Acceleration**: Supports `--target SUBPATH`, `-k EXPR` filtering, `--python PATH` cross-environment execution, and `--isolated-scope smart` (running expensive single-test process isolation only for tests that failed or flipped in suite runs).
 
 ### Stage 2 — Statistical Scoring & Polluter Inference (`src/analysis/`)
@@ -87,12 +87,13 @@ Each diagnostic section further pinpoints the **polluting predecessor test** and
 
 ## Installation & Quick Start
 
-Requires **Bash** and **Python 3.10+** (macOS and Linux).
+Requires **Python 3.10+** and supports **macOS**, **Linux**, and **Windows (PowerShell / CMD / Git Bash)**.
 
 ### Mode 1: Install Only the CLI Tool (`pip install`, without `scenario/`)
 
 If you want to install `pytest-flaky-triage` as a lightweight command-line tool to diagnose your own projects, `pip install` packages **only** the core triage engine (`flaky_triage`, `analysis`, `report`) and **does not** install the demo `scenario/` or test fixtures into your environment:
 
+**macOS / Linux:**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -100,6 +101,17 @@ pip install git+https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
 
 # Run directly on any pytest project:
 pytest-flaky-triage --project /path/to/your/project --out ./triage-out
+```
+
+**Windows (PowerShell):**
+```powershell
+python -m venv .venv
+# If PowerShell blocks script execution, run once: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+pip install git+https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
+
+# Run directly on any pytest project:
+pytest-flaky-triage --project C:\path\to\your\project --out .\triage-out
 ```
 
 #### Optional: Download Only the `scenario/` Benchmark Playground On Demand
@@ -123,8 +135,9 @@ pytest-flaky-triage --project ./scenario --out ./out --lang zh --report-only
 
 ### Mode 2: Full Repository Clone (Development, Demo & Self-Tests)
 
-If you want the full source tree, the `scenario/` benchmark suite, and the tool's 116-test verification suite in one place:
+If you want the full source tree, the `scenario/` benchmark suite, and the tool's 121-test verification suite in one place:
 
+**macOS / Linux:**
 ```bash
 git clone https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
 cd pytest-flaky-triage
@@ -135,13 +148,32 @@ pip install -e .
 
 # 1. Run the 18-test benchmark scenario end to end (~10s):
 pytest-flaky-triage --demo
-# (or: bash scripts/demo.sh)
 
 # 2. Inspect the generated Markdown triage report:
 cat out/report.md
 
-# 3. Run the tool's own 116 unit and integration tests:
+# 3. Run the tool's own 121 unit and integration tests:
 bash scripts/test.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
+cd pytest-flaky-triage
+python -m venv .venv
+# If PowerShell blocks script execution, run once: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -e .
+
+# 1. Run the 18-test benchmark scenario end to end (~10s):
+pytest-flaky-triage --demo
+
+# 2. Inspect the generated Markdown triage report:
+Get-Content out\report.md
+
+# 3. Run the tool's own 121 unit and integration tests:
+pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 
 ---

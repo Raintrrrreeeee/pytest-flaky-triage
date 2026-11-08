@@ -1,6 +1,8 @@
 """scripts/demo.sh runs the scenario end to end and lines it up with the answer key."""
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -10,9 +12,20 @@ CATEGORIES = {"hash_order", "randomness", "race_condition", "shared_state", "det
 
 
 def test_demo_runs_and_every_scenario_test_is_in_the_answer_key():
+    if os.name == "nt" or os.environ.get("FLAKY_PURE_PYTHON") == "1":
+        env = os.environ.copy()
+        env["FLAKY_PURE_PYTHON"] = "1"
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(ROOT / "src"), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+        )
+        cmd = [sys.executable, "-m", "flaky_triage.cli", "--demo"]
+    else:
+        env = None
+        cmd = ["bash", str(DEMO)]
     result = subprocess.run(
-        ["bash", str(DEMO), "--out", str(OUT),
+        [*cmd, "--out", str(OUT),
          "--repeats", "2", "--hash-seeds", "1", "--orders", "1", "--isolated", "0"],
+        env=env,
         capture_output=True, text=True, timeout=300,
     )
     assert result.returncode == 0, result.stderr

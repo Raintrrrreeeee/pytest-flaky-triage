@@ -156,34 +156,62 @@ def _csv_quote(text):
 def _cmd_run_timeout(argv):
     timeout_secs = float(argv[0])
     cmd = argv[1:]
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    is_win = os.name == "nt"
+    popen_kwargs = {"stdin": subprocess.DEVNULL}
+    if is_win:
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+
+    def _kill_tree(force=False, sig=None):
+        if is_win:
+            try:
+                args = ["taskkill", "/T", "/PID", str(proc.pid)]
+                if force:
+                    args.insert(1, "/F")
+                subprocess.run(
+                    args,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            except OSError:
+                pass
+            try:
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except OSError:
+                pass
+        else:
+            use_sig = sig if sig is not None else (signal.SIGKILL if force else signal.SIGTERM)
+            try:
+                os.killpg(proc.pid, use_sig)
+            except ProcessLookupError:
+                pass
 
     def _forward_signal(signum, _frame):
-        try:
-            os.killpg(proc.pid, signum)
-        except ProcessLookupError:
-            pass
+        _kill_tree(force=False, sig=signum)
 
     signal.signal(signal.SIGINT, _forward_signal)
-    signal.signal(signal.SIGTERM, _forward_signal)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _forward_signal)
 
     try:
         rc = proc.wait(timeout=timeout_secs)
         return (128 + (-rc)) if rc < 0 else rc
     except subprocess.TimeoutExpired:
+        _kill_tree(force=False)
         try:
-            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            _kill_tree(force=True)
             try:
                 proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-        except ProcessLookupError:
-            pass
+                pass
         return 124
 
 

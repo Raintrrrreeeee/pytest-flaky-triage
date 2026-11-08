@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytest-flaky-triage"
-version = "2.1.0"
+version = "2.1.1"
 description = "Three-stage pytest flaky-test detection, statistical root-cause inference, and AST fault-side triage tool"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -28,6 +28,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

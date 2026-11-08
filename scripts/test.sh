@@ -6,6 +6,8 @@ set -euo pipefail
 TOOL_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
     PYTHON=$TOOL_ROOT/.venv/bin/python
+elif [[ -x $TOOL_ROOT/.venv/Scripts/python.exe ]]; then
+    PYTHON=$TOOL_ROOT/.venv/Scripts/python.exe
 else
     PYTHON=$(command -v python3 || command -v python || true)
 fi
