@@ -12,8 +12,13 @@
 
 set -euo pipefail
 
-TOOL_ROOT=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
-LIB_DIR="$TOOL_ROOT/scripts/lib"
+SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+TOOL_ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd -P)
+if [[ -d $SCRIPT_DIR/lib ]]; then
+    LIB_DIR="$SCRIPT_DIR/lib"
+else
+    LIB_DIR="$TOOL_ROOT/scripts/lib"
+fi
 
 # Exit codes (documented in README.md)
 readonly E_USAGE=2      # bad arguments
@@ -29,7 +34,11 @@ ORDERS=5
 ISOLATED=1
 ISOLATED_SCOPE="all"
 TIMEOUT=60
-OUT_DIR="$TOOL_ROOT/out"
+if [[ ${FLAKY_INSTALLED_PACKAGE:-0} == 1 ]]; then
+    OUT_DIR="$(pwd -P)/out"
+else
+    OUT_DIR="$TOOL_ROOT/out"
+fi
 PYTHON=""
 TARGET_SUBPATH=""
 KEYWORD_EXPR=""
@@ -154,7 +163,9 @@ fi
 
 # Resolve TOOL_PYTHON (runs internal helpers, analysis, and report stages)
 TOOL_PYTHON=""
-if [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
+if [[ -n ${FLAKY_TOOL_PYTHON:-} && -x ${FLAKY_TOOL_PYTHON:-} ]]; then
+    TOOL_PYTHON=$FLAKY_TOOL_PYTHON
+elif [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
     TOOL_PYTHON=$TOOL_ROOT/.venv/bin/python
 else
     TOOL_PYTHON=$(command -v python3 || true)
@@ -484,7 +495,7 @@ if [[ $REPORT == no ]]; then
     exit 0
 fi
 
-if [[ ! -d $TOOL_ROOT/src/analysis ]]; then
+if [[ ! -d $TOOL_ROOT/src/analysis && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
     say "analysis stage not in the repository yet; stopping after results.csv"
     exit 0
 fi
@@ -499,7 +510,7 @@ case $analysis_rc in
     *) die "analysis stage failed with exit code $analysis_rc" "$E_REPORT" ;;
 esac
 
-if [[ ! -d $TOOL_ROOT/src/report ]]; then
+if [[ ! -d $TOOL_ROOT/src/report && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
     say "report stage not in the repository yet; stopping after diagnosis.json"
     exit 0
 fi
