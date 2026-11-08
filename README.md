@@ -106,7 +106,7 @@ pytest-flaky-triage --project /path/to/your/project --out ./triage-out
 **Windows (PowerShell):**
 ```powershell
 python -m venv .venv
-# If PowerShell blocks script execution, run once: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 pip install git+https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
 
@@ -161,7 +161,7 @@ bash scripts/test.sh
 git clone https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
 cd pytest-flaky-triage
 python -m venv .venv
-# If PowerShell blocks script execution, run once: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 pip install -e .
