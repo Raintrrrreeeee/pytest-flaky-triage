@@ -1,10 +1,57 @@
 # pytest-flaky-triage
 
+[![CI](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![pytest >= 7.4](https://img.shields.io/badge/pytest-%3E%3D7.4-0A9EDC.svg)](https://docs.pytest.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 **English** | [简体中文](README.zh-CN.md)
 
 A three-stage flaky-test detection, statistical root-cause inference, and static AST fault-side triage tool for Python `pytest` suites.
 
 Unlike simple rerun plugins (`pytest-repeat`, `pytest-flakefinder`, `pytest-random-order`) that only tell you *whether* a test failed across repeated runs, **`pytest-flaky-triage`** runs controlled single-factor experiments, identifies the exact polluting predecessor test for order-dependent failures, and combines runtime evidence with static Python AST analysis to tell you **why** a test is flaky and **whether the bug lives in the test (`Test Side`) or in production code (`Code Side`)**.
+
+```text
++-------------------------------------------------------------------------+
+| Stage 1: Controlled Perturbation Matrix (scripts/detect.sh)             |
+|   repeat -> hashseed -> order (O(N) hook) -> isolated                   |
+|   Pytest Sideband Hook Plugin + Process-Group Timeout Controller        |
++------------------------------------+------------------------------------+
+                                     |  results.csv & run_meta.csv
+                                     v
++-------------------------------------------------------------------------+
+| Stage 2: Statistical & Causal Inference (src/analysis/)                 |
+|   Crash-resilient stability score + Orthogonal condition attribution    |
+|   Bidirectional isolation check + Polluter set intersection             |
++------------------------------------+------------------------------------+
+                                     |  diagnosis.json
+                                     v
++-------------------------------------------------------------------------+
+| Stage 3: Static Python AST Disambiguation & Report (src/report/)        |
+|   3-hop cross-file call graph + conftest.py fixtures + setup_method     |
+|   Test Side vs. Code Side fault attribution -> report.md (EN / ZH)      |
++-------------------------------------------------------------------------+
+```
+
+---
+
+## Sample Output Preview (`out/report.md`)
+
+```markdown
+| Test                                     | Verdict  | Score        | Repeat | Hashseed | Order | Isolated | Suspected Cause             | Fault Side | Basis       |
+| :--------------------------------------- | :------: | :----------: | :----: | :------: | :---: | :------: | :-------------------------- | :--------: | :---------- |
+| `test_taxes_format`                      | `flaky`  | 0.12 (3/25)  |  0/10  |   3/8    |  0/6  |   0/1    | `hash_order_sensitivity`    | Test Side  | Runtime+AST |
+| `test_shared_cart_has_no_prior_laptop`   | `flaky`  | 0.12 (3/25)  |  0/10  |   0/8    |  2/6  |   1/1    | `shared_state_interference` | Test Side  | Runtime+AST |
+| `test_get_daily_quote`                   | `flaky`  | 0.16 (4/25)  |  2/10  |   2/8    |  0/6  |   0/1    | `unseeded_randomness`       | Code Side  | AST Hint *  |
+| `test_checkout_deducts_mouse`            | `flaky`  | 0.44 (11/25) |  4/10  |   4/8    |  2/6  |   1/1    | `race_conditions`           | Code Side  | AST Hint *  |
+| `test_add_item_to_cart_is_deterministic` | `stable` | 1.00 (25/25) | 10/10  |   8/8    |  6/6  |   1/1    | —                           |     —      | —           |
+```
+
+Each diagnostic section further pinpoints the **polluting predecessor test** and **exact source line**:
+- **`shared_state_interference`**: `Suspected polluting predecessor(s): test_new_cart_is_empty` -> `tests/test_cart.py:123 accesses/mutates shared module-level object shared_test_cart (declared at tests/test_cart.py:7)`
+- **`unseeded_randomness`**: `src/ecommerce/cart.py:56 calls random.choice(...) without a fixed seed`
+- **`race_conditions`**: `src/ecommerce/cart.py:66, 70, 74 uses unsynchronized concurrency/timing primitives (time.sleep, unjoined threading.Thread)`
 
 ---
 
@@ -196,6 +243,10 @@ The repository includes an optional simulated **E-commerce Cart and Checkout Sys
 3. **Race Conditions (`race_conditions`, Code Side, 4 tests):** `Cart.checkout()` spawns an unjoined background `threading.Thread` to deduct inventory, racing against the test's immediate stock assertion.
 4. **Shared State Interference (`shared_state_interference`, Test Side, 4 tests):** Two pairs of tests mutate shared module-level `Cart` instances (`shared_test_cart` and `secondary_shared_cart`) without cleanup, failing depending on execution order and passing in isolation.
 5. **Deterministic Controls (`stable`, 2 tests):** Purely local, deterministic, synchronous tests that pass 100% of the time across all conditions.
+
+## Acknowledgements
+
+Special thanks to **Hongguan Tan** and **Huizern Lim** for their valuable collaboration, discussions, and contributions to the initial prototype and controlled benchmark scenario design that inspired this standalone v2 tool.
 
 ## License
 

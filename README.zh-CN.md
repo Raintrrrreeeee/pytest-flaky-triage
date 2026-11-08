@@ -1,10 +1,57 @@
 # pytest-flaky-triage
 
+[![CI](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![pytest >= 7.4](https://img.shields.io/badge/pytest-%3E%3D7.4-0A9EDC.svg)](https://docs.pytest.org/)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 [English](README.md) | **简体中文**
 
 一个面向 Python `pytest` 测试套件的**三阶段不稳定测试（Flaky Test）检测、统计根因推断与 AST 静态源码归责工具**。
 
 市面上常见的重跑插件（如 `pytest-repeat`、`pytest-flakefinder`、`pytest-random-order`）只能告诉你某个测试在多次运行中“有没有挂过”；而 **`pytest-flaky-triage`** 通过控制变量实验矩阵、前置污染源测试集合求交、以及 Python 抽象语法树（AST）跨文件静态扫描，不仅能自动诊断**测试为什么不稳定**，还能揪出**是哪个前置测试污染了环境**，并精准判定**缺陷究竟出在测试代码（`Test Side`）还是业务代码（`Code Side`）的具体哪一行**。
+
+```text
++-------------------------------------------------------------------------+
+| 第一阶段：四维控制变量矩阵执行引擎 (scripts/detect.sh)                  |
+|   repeat（重复）-> hashseed（哈希）-> order（顺序）-> isolated（隔离）  |
+|   Pytest Sideband Hook 实时插件 + 进程组超时保护控制器                  |
++------------------------------------+------------------------------------+
+                                     |  results.csv & run_meta.csv
+                                     v
++-------------------------------------------------------------------------+
+| 第二阶段：统计评分与污染源因果推断 (src/analysis/)                      |
+|   抗崩溃稳定性得分计算 + 正交实验条件归因                               |
+|   双向隔离效应检测 + 前置污染源测试集合求交 (suspected_polluters)       |
++------------------------------------+------------------------------------+
+                                     |  diagnosis.json
+                                     v
++-------------------------------------------------------------------------+
+| 第三阶段：Python AST 静态源码消歧与报告生成 (src/report/)               |
+|   跨文件 3 层调用链追踪 + conftest.py 夹具解析 + setup_method 追踪       |
+|   测试侧 vs. 业务侧责任归属 -> 生成英文或中文 Markdown 报告 (report.md) |
++-------------------------------------------------------------------------+
+```
+
+---
+
+## 诊断报告输出预览（支持 `--lang zh` 中文报告）
+
+```markdown
+| 测试名称                                 | 判定结果 | 稳定性得分   | 重复基线 (Repeat) | 哈希种子 (Hashseed) | 执行顺序 (Order) | 单测隔离 (Isolated) | 怀疑根因                                 | 责任归属           | 判定依据   |
+| :--------------------------------------- | :------: | :----------: | :---------------: | :-----------------: | :--------------: | :-----------------: | :--------------------------------------- | :----------------: | :--------- |
+| `test_taxes_format`                      | `flaky`  | 0.12 (3/25)  |       0/10        |         3/8         |       0/6        |         0/1         | `hash_order_sensitivity` (哈希顺序敏感)   | 测试侧 (Test Side) | 运行时+AST |
+| `test_shared_cart_has_no_prior_laptop`   | `flaky`  | 0.12 (3/25)  |       0/10        |         0/8         |       2/6        |         1/1         | `shared_state_interference` (共享状态污染) | 测试侧 (Test Side) | 运行时+AST |
+| `test_get_daily_quote`                   | `flaky`  | 0.16 (4/25)  |       2/10        |         2/8         |       0/6        |         0/1         | `unseeded_randomness` (未固定随机种子)    | 业务侧 (Code Side) | AST 消歧 * |
+| `test_checkout_deducts_mouse`            | `flaky`  | 0.44 (11/25) |       4/10        |         4/8         |       2/6        |         1/1         | `race_conditions` (并发时间竞态)          | 业务侧 (Code Side) | AST 消歧 * |
+| `test_add_item_to_cart_is_deterministic` | `stable` | 1.00 (25/25) |       10/10       |         8/8         |       6/6        |         1/1         | —                                        |         —          | —          |
+```
+
+在汇总表下方的诊断详情中，工具还会直接列出**疑似前置污染源测试**与**具体源码位置**：
+- **`shared_state_interference`（共享状态污染）**：`疑似前置污染源测试：test_new_cart_is_empty` -> `tests/test_cart.py:123 读写/修改了模块级共享对象 shared_test_cart（声明于 tests/test_cart.py:7）`
+- **`unseeded_randomness`（未固定随机种子）**：`src/ecommerce/cart.py:56 调用了 random.choice(...) 且未固定随机种子`
+- **`race_conditions`（并发时间竞态）**：`src/ecommerce/cart.py:66, 70, 74 使用了未同步的并发/计时原语 (time.sleep, unjoined threading.Thread)`
 
 ---
 
@@ -164,6 +211,10 @@ scripts/detect.sh --project PATH [options]
 3. **并发竞态条件（`race_conditions`，Code Side 业务侧，4 个测试）**：`Cart.checkout()` 启动了后台 `threading.Thread` 线程异步扣减库存但未调用 `join()` 等待完成，与测试中紧随其后的库存断言产生时间竞态。
 4. **共享状态互相污染（`shared_state_interference`，Test Side 测试侧，4 个测试）**：两组测试直接修改模块级共享购物车对象（`shared_test_cart` 与 `secondary_shared_cart`）且未清理，导致结果随执行顺序翻转，而在单测隔离下全部通过。
 5. **确定性稳定对照（`stable`，2 个测试）**：完全使用局部状态、同步确定性逻辑的正常测试，在全部 42 轮运行中 100% 通过。
+
+## 致谢（Acknowledgements）
+
+特别感谢 **Hongguan Tan** 与 **Huizern Lim** 在项目早期原型探索与受控基准测试靶场（`scenario/`）设计过程中的宝贵合作、讨论与贡献，为本独立开源版本（v2）的架构演进奠定了基础。
 
 ## 开源协议
 

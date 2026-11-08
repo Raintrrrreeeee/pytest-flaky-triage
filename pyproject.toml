@@ -7,10 +7,44 @@ name = "pytest-flaky-triage"
 version = "2.0.0"
 description = "Three-stage pytest flaky-test detection, statistical root-cause inference, and AST fault-side triage tool"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
+authors = [
+    { name = "Zishu Chen" },
+]
+keywords = [
+    "pytest",
+    "flaky-tests",
+    "testing",
+    "static-analysis",
+    "ast",
+    "root-cause-analysis",
+    "triage",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "pytest>=7.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Raintrrrreeeee/pytest-flaky-triage"
+Repository = "https://github.com/Raintrrrreeeee/pytest-flaky-triage.git"
+Issues = "https://github.com/Raintrrrreeeee/pytest-flaky-triage/issues"
 
 [project.scripts]
 pytest-flaky-triage = "flaky_triage.cli:main"
@@ -20,4 +54,3 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 flaky_triage = ["runtime/*.sh", "runtime/lib/*"]
-
