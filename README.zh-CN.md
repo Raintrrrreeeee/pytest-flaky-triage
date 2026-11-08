@@ -1,6 +1,7 @@
 # pytest-flaky-triage
 
 [![CI](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Raintrrrreeeee/pytest-flaky-triage)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/releases)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![pytest >= 7.4](https://img.shields.io/badge/pytest-%3E%3D7.4-0A9EDC.svg)](https://docs.pytest.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#)
@@ -108,11 +109,14 @@ pytest-flaky-triage --project /path/to/your/project --out ./triage-out
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/Raintrrrreeeee/pytest-flaky-triage.git flaky-demo
 cd flaky-demo
-git sparse-checkout set scenario docs
+git sparse-checkout set --no-cone /scenario /docs
 
-# 使用已安装的 CLI 工具检测下载好的 scenario 靶场（约 10 秒）：
+# 使用已安装的 CLI 工具检测下载好的 scenario 靶场（约 10 秒，也可直接跑 pytest-flaky-triage --demo --lang zh）：
 pytest-flaky-triage --project ./scenario --out ./out --lang zh
 cat ./out/report.md
+
+# 若已跑完英文版想秒切中文版（无需重跑 42 轮 pytest）：
+# pytest-flaky-triage --project ./scenario --out ./out --lang zh --report-only
 ```
 
 ---
@@ -175,6 +179,7 @@ scripts/detect.sh --project PATH [options]
 | `--out DIR` | `out/` | 诊断产物输出目录（自动拦截 `/`、`$HOME`、软链接及包含目标项目的危险路径） |
 | `--python PATH` | 自动探测 | 指定运行目标项目的 Python 解释器路径 |
 | `--lang LANG` | `en` | 诊断报告 `report.md` 的输出语言：`en`（英文，默认）或 `zh`（简体中文，也可直接传给 `python -m report ... --lang zh`） |
+| `--report-only` | 关闭 | 基于 `out/` 下已有的运行结果直接重新生成 `report.md`（例如秒切中英文报告，无需重跑 `pytest`） |
 | `--no-report` | 关闭 | 仅生成 `results.csv` 和 `run_meta.csv`，不执行后续分析与报告生成 |
 
 ### 退出状态码（Exit Codes）

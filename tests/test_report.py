@@ -1088,10 +1088,33 @@ def test_extended_ast_heuristics_fixtures_code_side_shared_and_seed_suppression(
 
 
 def test_chinese_report_rendering_and_cli(tmp_path):
-    """Verify --lang zh generates a localized Chinese Markdown report."""
+    """Verify --lang zh generates a localized Chinese Markdown report with deduplicated headings,
+    translated conflict hints, and East-Asian-width-aligned Markdown tables."""
+    import unicodedata
+
+    def disp_width(text):
+        return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
     scenario_dir = Path(__file__).resolve().parents[1] / "scenario"
     diagnosis = _sample_diagnosis()
     diagnosis["tests"][1]["test_id"] = "tests/test_cart.py::test_get_daily_quote"
+    second_rand = copy.deepcopy(diagnosis["tests"][1])
+    second_rand["test_id"] = "tests/test_cart.py::test_select_promo_banner"
+    conflict_test = copy.deepcopy(diagnosis["tests"][1])
+    conflict_test["test_id"] = "tests/test_cart.py::test_default_avatar_assignment"
+    conflict_test["suspected_causes"] = [
+        {
+            "candidates": ["hash_order_sensitivity"],
+            "status": "suspected",
+            "reason": "Outcomes differ across hash seeds while repeat outcomes are consistent.",
+            "run_ids": [1, 2],
+        }
+    ]
+    diagnosis["tests"].extend([second_rand, conflict_test])
+    diagnosis["summary"]["tests"] = len(diagnosis["tests"])
+    diagnosis["summary"]["records"] = sum(len(t["evidence"]) for t in diagnosis["tests"])
+    diagnosis["summary"]["verdicts"]["flaky"] = 3
+
     md_zh = render_markdown(diagnosis, project_dir=scenario_dir, lang="zh")
     assert "# 测试稳定性诊断报告 (Test-Stability Triage Report)" in md_zh
     assert "## 1. 概览摘要" in md_zh
@@ -1100,6 +1123,29 @@ def test_chinese_report_rendering_and_cli(tmp_path):
     assert "未固定随机种子" in md_zh
     assert "业务侧 (Code Side)" in md_zh
     assert "AST 消歧 *" in md_zh
+    # Heading fault side must NOT repeat when multiple tests share the same fault side
+    assert "业务侧 (Code Side) / 业务侧 (Code Side)" not in md_zh
+    # Conflicting AST hint and basis must be translated into Chinese
+    assert "运行时 (AST 冲突)" in md_zh
+    assert "冲突的 AST 提示：" in md_zh
+    assert "但运行时证据指向" in md_zh
+    assert "Conflicting hint:" not in md_zh
+
+    # Every Markdown table block must have visually aligned pipes under East Asian display width
+    table_lines = [ln for ln in md_zh.splitlines() if ln.startswith("| ")]
+    assert table_lines
+    # Group consecutive table lines and assert uniform display width per table
+    current_table = []
+    for ln in md_zh.splitlines():
+        if ln.startswith("| "):
+            current_table.append(ln)
+        elif current_table:
+            widths = {disp_width(row) for row in current_table}
+            assert len(widths) == 1, f"Misaligned Chinese table rows: {current_table}"
+            current_table = []
+    if current_table:
+        widths = {disp_width(row) for row in current_table}
+        assert len(widths) == 1, f"Misaligned Chinese table rows: {current_table}"
 
     diag_path = tmp_path / "diagnosis.json"
     out_dir = tmp_path / "out_zh"

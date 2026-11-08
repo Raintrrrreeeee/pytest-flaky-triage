@@ -12,17 +12,19 @@ def main(argv=None):
     repo_root = pkg_dir.parents[1]
     env = os.environ.copy()
     env.setdefault("FLAKY_TOOL_PYTHON", sys.executable)
+    env.setdefault("FLAKY_CLI_NAME", "pytest-flaky-triage")
 
     if (repo_root / "scripts" / "detect.sh").is_file():
-        if args and args[0] == "--demo":
-            script = repo_root / "scripts" / "demo.sh"
-            cmd = ["bash", str(script), *args[1:]]
-        else:
-            script = repo_root / "scripts" / "detect.sh"
-            cmd = ["bash", str(script), *args]
+        script_dir = repo_root / "scripts"
     else:
         env["FLAKY_INSTALLED_PACKAGE"] = "1"
-        script = pkg_dir / "runtime" / "detect.sh"
+        script_dir = pkg_dir / "runtime"
+
+    if args and args[0] == "--demo":
+        script = script_dir / "demo.sh"
+        cmd = ["bash", str(script), *args[1:]]
+    else:
+        script = script_dir / "detect.sh"
         cmd = ["bash", str(script), *args]
 
     proc = subprocess.run(cmd, env=env, check=False)
