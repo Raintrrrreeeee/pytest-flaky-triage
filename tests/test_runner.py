@@ -1,5 +1,7 @@
-"""Argument and failure handling of scripts/detect.sh (exit codes in README.md)."""
+"""Argument and failure handling of scripts/detect.sh and flaky_triage.runner (exit codes in README.md)."""
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,20 @@ OUT = str(ROOT / "out" / "selftest" / "runner")
 
 
 def detect(*args):
+    if os.name == "nt" or os.environ.get("FLAKY_PURE_PYTHON") == "1":
+        env = os.environ.copy()
+        env["FLAKY_PURE_PYTHON"] = "1"
+        env["FLAKY_CLI_NAME"] = "scripts/detect.sh"
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(ROOT / "src"), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+        )
+        return subprocess.run(
+            [sys.executable, "-m", "flaky_triage.cli", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
     return subprocess.run(["bash", str(DETECT), *args], capture_output=True, text=True, timeout=120)
 
 
@@ -78,7 +94,10 @@ def test_symlinked_output_outside_tool_is_rejected(tmp_path):
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.exists() or link.is_symlink():
         link.unlink()
-    link.symlink_to(external, target_is_directory=True)
+    try:
+        link.symlink_to(external, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks not permitted in this environment: {exc}")
     try:
         result = detect("--project", GOOD_PROJECT, "--out", str(link), "--no-report")
     finally:
@@ -93,7 +112,10 @@ def test_symlink_alias_of_the_project_is_rejected():
     link = ROOT / "out" / "selftest" / "link_to_project"
     link.parent.mkdir(parents=True, exist_ok=True)
     link.unlink(missing_ok=True)
-    link.symlink_to(FIXTURES / "outcomes", target_is_directory=True)
+    try:
+        link.symlink_to(FIXTURES / "outcomes", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks not permitted in this environment: {exc}")
     try:
         result = detect("--project", GOOD_PROJECT, "--out", str(link), "--no-report")
     finally:
@@ -185,12 +207,10 @@ def test_sparse_checkout_wrapper_dir_hints_scenario_subfolder(tmp_path):
 
 
 def test_installed_cli_branding_and_demo_mode(tmp_path):
-    import sys
-
     env_PYTHONPATH = str(ROOT / "src")
     proc_help = subprocess.run(
         [sys.executable, "-m", "flaky_triage.cli", "--help"],
-        env={**subprocess.os.environ, "PYTHONPATH": env_PYTHONPATH},
+        env={**os.environ, "PYTHONPATH": env_PYTHONPATH},
         capture_output=True,
         text=True,
         timeout=30,
@@ -199,12 +219,23 @@ def test_installed_cli_branding_and_demo_mode(tmp_path):
     assert "Usage: pytest-flaky-triage" in proc_help.stdout
 
     # Simulate installed package mode (--demo when scenario is not in cwd prints helpful download instructions)
+    use_pure = os.name == "nt" or os.environ.get("FLAKY_PURE_PYTHON") == "1"
     runtime_demo = ROOT / "src" / "flaky_triage" / "runtime" / "demo.sh"
     assert runtime_demo.is_file()
+    demo_cmd = (
+        [sys.executable, "-m", "flaky_triage.cli", "--demo"]
+        if use_pure
+        else ["bash", str(runtime_demo)]
+    )
     proc_missing_demo = subprocess.run(
-        ["bash", str(runtime_demo)],
+        demo_cmd,
         cwd=str(tmp_path),
-        env={**subprocess.os.environ, "FLAKY_INSTALLED_PACKAGE": "1"},
+        env={
+            **os.environ,
+            "FLAKY_INSTALLED_PACKAGE": "1",
+            "FLAKY_PURE_PYTHON": "1" if use_pure else "0",
+            "PYTHONPATH": env_PYTHONPATH,
+        },
         capture_output=True,
         text=True,
         timeout=30,
@@ -220,8 +251,7 @@ def test_installed_cli_branding_and_demo_mode(tmp_path):
     )
     proc_run_demo = subprocess.run(
         [
-            "bash",
-            str(runtime_demo),
+            *demo_cmd,
             "--repeats=2",
             "--hash-seeds=",
             "--orders=0",
@@ -229,8 +259,9 @@ def test_installed_cli_branding_and_demo_mode(tmp_path):
         ],
         cwd=str(demo_workspace),
         env={
-            **subprocess.os.environ,
+            **os.environ,
             "FLAKY_INSTALLED_PACKAGE": "1",
+            "FLAKY_PURE_PYTHON": "1" if use_pure else "0",
             "FLAKY_TOOL_PYTHON": sys.executable,
             "PYTHONPATH": env_PYTHONPATH,
         },
@@ -262,5 +293,39 @@ def test_installed_cli_branding_and_demo_mode(tmp_path):
     assert res_in_proj.returncode == 0, res_in_proj.stderr
     collected_ids = (in_proj_out / "collected.txt").read_text(encoding="utf-8")
     assert "test_should_be_ignored" not in collected_ids
+
+
+def test_pure_python_runner_cross_platform_mode(tmp_path):
+    """Explicitly exercise flaky_triage.runner (used natively on Windows PowerShell/CMD)."""
+    env = {
+        **os.environ,
+        "FLAKY_PURE_PYTHON": "1",
+        "PYTHONPATH": str(ROOT / "src"),
+    }
+    out_dir = tmp_path / "pure_out"
+    res = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "flaky_triage",
+            f"--project={GOOD_PROJECT}",
+            f"--out={out_dir}",
+            "--repeats=2",
+            "--hash-seeds=1",
+            "--orders=1",
+            "--isolated=1",
+            "--lang=zh",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert res.returncode == 0, res.stderr
+    assert (out_dir / "results.csv").is_file()
+    assert (out_dir / "diagnosis.json").is_file()
+    report_text = (out_dir / "report.md").read_text(encoding="utf-8")
+    assert "# 测试稳定性诊断报告" in report_text
+
 
 

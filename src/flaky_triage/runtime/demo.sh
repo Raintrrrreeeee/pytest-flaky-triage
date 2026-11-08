@@ -37,8 +37,15 @@ if [[ -n ${FLAKY_TOOL_PYTHON:-} && -x ${FLAKY_TOOL_PYTHON:-} ]]; then
     PYTHON=$FLAKY_TOOL_PYTHON
 elif [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
     PYTHON=$TOOL_ROOT/.venv/bin/python
+elif [[ -x $TOOL_ROOT/.venv/Scripts/python.exe ]]; then
+    PYTHON=$TOOL_ROOT/.venv/Scripts/python.exe
 else
-    PYTHON=$(command -v python3 || true)
+    PYTHON=$(command -v python3 || command -v python || true)
+fi
+
+if [[ -n $PYTHON && ( ${OSTYPE:-} == msys* || ${OSTYPE:-} == cygwin* || ${OS:-} == Windows_NT ) ]]; then
+    FLAKY_PURE_PYTHON=1 PYTHONPATH="$TOOL_ROOT/src${PYTHONPATH:+;$PYTHONPATH}" \
+        exec "$PYTHON" -m flaky_triage.cli --demo "$@"
 fi
 
 die() {

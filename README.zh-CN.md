@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/Raintrrrreeeee/pytest-flaky-triage)](https://github.com/Raintrrrreeeee/pytest-flaky-triage/releases)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![pytest >= 7.4](https://img.shields.io/badge/pytest-%3E%3D7.4-0A9EDC.svg)](https://docs.pytest.org/)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 [English](README.md) | **简体中文**
@@ -58,11 +58,11 @@
 
 ## 核心功能亮点
 
-### 第一阶段：四维控制变量矩阵执行引擎（`scripts/detect.sh` & `flaky_plugin.py`）
+### 第一阶段：四维控制变量矩阵执行引擎（`flaky_triage.runner`、`scripts/detect.sh` & `flaky_plugin.py`）
 - **单因子正交实验设计**：在四个正交维度（固定条件重复 `repeat`、切换哈希种子 `hashseed`、打乱执行顺序 `order`、单测独立运行 `isolated`）下运行目标测试套件，每次只改变一个变量，从实验设计层面隔离不同根因。
-- **内置 Pytest Sideband Hook 插件**：直接挂载 `pytest` 生命周期钩子（`setup` / `call` / `teardown`），将每个测试的真实执行结果实时写入独立的结构化数据流，不受目标项目 `pytest.ini` 配置（如 `-q` 静默输出、进度条插件、多行报错堆栈、带空格或特殊符号的参数化测试名）干扰；同时保留加固版 AWK 日志解析器（`parse_log.awk`）作为兜底。
+- **内置 Pytest Sideband Hook 插件**：直接挂载 `pytest` 生命周期钩子（`setup` / `call` / `teardown`），将每个测试的真实执行结果实时写入独立的结构化数据流，不受目标项目 `pytest.ini` 配置（如 `-q` 静默输出、进度条插件、多行报错堆栈、带空格或特殊符号的参数化测试名）干扰；同时保留加固版日志解析器作为兜底。
 - **内存级 `O(N)` 顺序重排与冲突插件屏蔽**：在 `pytest_collection_modifyitems` 阶段按指定顺序文件直接重排测试，并自动屏蔽目标环境中可能干扰实验控制的第三方插件（如 `pytest-randomly`、`pytest-xdist`、`pytest-sugar`、`pytest-cov`、`pytest-rerunfailures`、`pytest-order`）。
-- **macOS / Linux 原生进程组超时保护**：每次运行均在独立进程组（`start_new_session=True`）中启动并关闭 `stdin`（`/dev/null`），超时后自动执行 `SIGTERM -> SIGKILL` 整树清理（退出码 `124`），防止死循环或残留后台线程卡死终端。
+- **macOS / Linux / Windows 跨平台进程树超时保护**：每次运行均在独立进程组中启动并关闭 `stdin`，超时后自动清理整棵进程树（退出码 `124`），在 **macOS、Linux 与 Windows（PowerShell / CMD / Git Bash）** 下均可防止死循环或残留后台线程卡死终端。
 - **大型项目加速与按需筛选**：支持 `--target SUBPATH` 指定子目录或文件、`-k EXPR` 关键词过滤、`--python PATH` 指定外部虚拟环境解释器，以及 `--isolated-scope smart` 智能隔离模式（仅对在套件运行中失败或波动的测试执行单测进程隔离，大幅缩短大型项目耗时）。
 
 ### 第二阶段：统计稳定性评分与污染源定位（`src/analysis/`）
@@ -87,19 +87,31 @@
 
 ## 安装与快速体验指南
 
-运行环境要求：**Bash** 与 **Python 3.10+**（支持 macOS 与 Linux）。
+运行环境要求：**Python 3.10+**，原生支持 **macOS**、**Linux** 与 **Windows（PowerShell / CMD / Git Bash）**。
 
 ### 方式一：仅安装命令行工具（轻量级 `pip install`，不会下载 `scenario/`）
 
 如果你只想把 `pytest-flaky-triage` 当作命令行工具安装到自己的环境中去检测实际项目，通过 `pip install` 安装时**只会打包核心诊断引擎**（`flaky_triage`、`analysis`、`report`），**不会**把演示用的 `scenario/` 靶场或测试夹具塞进你的 Python 环境：
 
+**macOS / Linux：**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install git+https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
 
 # 安装后即可直接对任意 pytest 项目运行诊断：
-pytest-flaky-triage --project /path/to/your/project --out ./triage-out
+pytest-flaky-triage --project /path/to/your/project --out ./triage-out --lang zh
+```
+
+**Windows (PowerShell)：**
+```powershell
+python -m venv .venv
+# 若 PowerShell 提示禁止运行脚本，可先执行一次：Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+pip install git+https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
+
+# 安装后即可直接对任意 pytest 项目运行诊断：
+pytest-flaky-triage --project C:\path\to\your\project --out .\triage-out --lang zh
 ```
 
 #### 可选步骤：按需单独下载 `scenario/` 官方演示靶场练手
@@ -121,10 +133,11 @@ cat ./out/report.md
 
 ---
 
-### 方式二：克隆完整仓库（包含源码、演示靶场与 116 项自测套件）
+### 方式二：克隆完整仓库（包含源码、演示靶场与 121 项自测套件）
 
-如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 116 个自动化测试用例：
+如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 121 个自动化测试用例：
 
+**macOS / Linux：**
 ```bash
 git clone https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
 cd pytest-flaky-triage
@@ -135,13 +148,32 @@ pip install -e .
 
 # 1. 一键运行内置的 18 个测试演示靶场（约 10 秒跑完 42 轮矩阵，可通过 --lang zh 输出中文报告）：
 pytest-flaky-triage --demo --lang zh
-# （或者运行：bash scripts/demo.sh --lang zh）
 
 # 2. 查看生成的 Markdown 诊断报告：
 cat out/report.md
 
-# 3. 运行工具自身的 116 个单元与集成测试：
+# 3. 运行工具自身的 121 个单元与集成测试：
 bash scripts/test.sh
+```
+
+**Windows (PowerShell)：**
+```powershell
+git clone https://github.com/Raintrrrreeeee/pytest-flaky-triage.git
+cd pytest-flaky-triage
+python -m venv .venv
+# 若 PowerShell 提示禁止运行脚本，可先执行一次：Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -e .
+
+# 1. 一键运行内置的 18 个测试演示靶场（约 10 秒跑完 42 轮矩阵，可通过 --lang zh 输出中文报告）：
+pytest-flaky-triage --demo --lang zh
+
+# 2. 查看生成的 Markdown 诊断报告：
+Get-Content out\report.md
+
+# 3. 运行工具自身的 121 个单元与集成测试：
+pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 
 ---

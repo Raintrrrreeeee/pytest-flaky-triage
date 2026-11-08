@@ -192,10 +192,18 @@ if [[ -n ${FLAKY_TOOL_PYTHON:-} && -x ${FLAKY_TOOL_PYTHON:-} ]]; then
     TOOL_PYTHON=$FLAKY_TOOL_PYTHON
 elif [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
     TOOL_PYTHON=$TOOL_ROOT/.venv/bin/python
+elif [[ -x $TOOL_ROOT/.venv/Scripts/python.exe ]]; then
+    TOOL_PYTHON=$TOOL_ROOT/.venv/Scripts/python.exe
 else
-    TOOL_PYTHON=$(command -v python3 || true)
+    TOOL_PYTHON=$(command -v python3 || command -v python || true)
 fi
 [[ -n $TOOL_PYTHON && -x $TOOL_PYTHON ]] || die "no Python interpreter found for tool; create .venv as described in README.md" "$E_ENV"
+
+if [[ ${OSTYPE:-} == msys* || ${OSTYPE:-} == cygwin* || ${OS:-} == Windows_NT ]]; then
+    FLAKY_PURE_PYTHON=1 FLAKY_CLI_NAME="${FLAKY_CLI_NAME:-scripts/detect.sh}" \
+        PYTHONPATH="$TOOL_ROOT/src${PYTHONPATH:+;$PYTHONPATH}" \
+        exec "$TOOL_PYTHON" -m flaky_triage.cli "$@"
+fi
 
 TOOL_PYTHONPATH="$TOOL_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 

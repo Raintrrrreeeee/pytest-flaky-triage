@@ -59,9 +59,9 @@ def _parse_file(path):
 
 def _rel_path(path, project_dir):
     try:
-        return str(Path(path).resolve().relative_to(Path(project_dir).resolve()))
+        return Path(path).resolve().relative_to(Path(project_dir).resolve()).as_posix()
     except ValueError:
-        return str(path)
+        return Path(path).as_posix()
 
 
 def _resolve_module_file(project_dir, module_name, base_dir=None):

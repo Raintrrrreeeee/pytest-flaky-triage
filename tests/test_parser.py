@@ -5,7 +5,9 @@ unusual case. detect.sh runs it with the pinned pytest, and the results.csv
 it writes is compared row by row with the hand-written expected.csv.
 """
 import csv
+import os
 import subprocess
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -54,9 +56,20 @@ DETERMINISTIC = [
 
 def run_detect(case, *options, out_name=None):
     out_dir = SELFTEST_OUT / (out_name or case)
+    if os.name == "nt" or os.environ.get("FLAKY_PURE_PYTHON") == "1":
+        env = os.environ.copy()
+        env["FLAKY_PURE_PYTHON"] = "1"
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(ROOT / "src"), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+        )
+        cmd = [sys.executable, "-m", "flaky_triage.cli"]
+    else:
+        env = None
+        cmd = ["bash", str(DETECT)]
     result = subprocess.run(
-        ["bash", str(DETECT), "--project", str(FIXTURES / case), "--no-report",
+        [*cmd, "--project", str(FIXTURES / case), "--no-report",
          "--out", str(out_dir), *options],
+        env=env,
         capture_output=True,
         text=True,
         timeout=180,
