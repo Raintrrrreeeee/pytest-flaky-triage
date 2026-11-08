@@ -170,7 +170,7 @@ pip install -e .
 pytest-flaky-triage --demo --lang zh
 
 # 2. 查看生成的 Markdown 诊断报告：
-Get-Content out\report.md
+Get-Content -Encoding utf8 out\report.md
 
 # 3. 运行工具自身的 121 个单元与集成测试：
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures

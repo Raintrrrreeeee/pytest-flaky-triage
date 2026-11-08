@@ -170,7 +170,7 @@ pip install -e .
 pytest-flaky-triage --demo
 
 # 2. Inspect the generated Markdown triage report:
-Get-Content out\report.md
+Get-Content -Encoding utf8 out\report.md
 
 # 3. Run the tool's own 121 unit and integration tests:
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
