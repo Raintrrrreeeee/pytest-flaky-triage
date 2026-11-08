@@ -4,11 +4,15 @@
 set -euo pipefail
 
 TOOL_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-PYTHON=$TOOL_ROOT/.venv/bin/python
+if [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
+    PYTHON=$TOOL_ROOT/.venv/bin/python
+else
+    PYTHON=$(command -v python3 || command -v python || true)
+fi
 
-if [[ ! -x $PYTHON ]]; then
-    echo "test.sh: error: .venv not found; set it up first:" >&2
-    echo "  python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+if [[ -z $PYTHON || ! -x $PYTHON ]] || ! "$PYTHON" -m pytest --version >/dev/null 2>&1; then
+    echo "test.sh: error: pytest environment not found; set it up first:" >&2
+    echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
     exit 3
 fi
 
