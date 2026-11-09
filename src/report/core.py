@@ -23,6 +23,9 @@ CANDIDATES = {
     "hash_order_sensitivity",
     "shared_state_interference",
     "timezone_sensitivity",
+    "resource_leak",
+    "external_io",
+    "float_precision",
 }
 VERDICT_ORDER = {
     "flaky": 0,
@@ -32,10 +35,13 @@ VERDICT_ORDER = {
 }
 CATEGORY_ORDER = {
     ("hash_order_sensitivity",): 0,
-    ("shared_state_interference",): 1,
-    ("timezone_sensitivity",): 2,
-    ("unseeded_randomness",): 3,
-    ("race_conditions",): 4,
+    ("float_precision",): 1,
+    ("shared_state_interference",): 2,
+    ("resource_leak",): 3,
+    ("timezone_sensitivity",): 4,
+    ("unseeded_randomness",): 5,
+    ("race_conditions",): 6,
+    ("external_io",): 7,
 }
 RATE_TOLERANCE = 1e-6
 
@@ -485,9 +491,9 @@ def _item_sort_key(item):
     v_rank = VERDICT_ORDER.get(verdict, 9)
     cands = tuple(res["resolved_candidates"])
     if not cands:
-        c_rank = 6
+        c_rank = 9
     else:
-        c_rank = CATEGORY_ORDER.get(cands, 5)
+        c_rank = CATEGORY_ORDER.get(cands, 8)
     score = test["overall"]["stability_score"]
     s_rank = score if score is not None else -1.0
     return (v_rank, c_rank, s_rank, test["test_id"])
@@ -520,6 +526,9 @@ _ZH_CAUSE_LABELS = {
     "timezone_sensitivity": "时区/本地时间敏感",
     "unseeded_randomness": "未固定随机种子",
     "race_conditions": "并发时间竞态",
+    "resource_leak": "文件与端口资源冲突",
+    "external_io": "未隔离的外部网络依赖",
+    "float_precision": "浮点数精度断言隐患",
 }
 
 _ZH_SIDE_LABELS = {
@@ -566,6 +575,15 @@ def _translate_reason_zh(reason):
         "Outcomes differ across timezones (TZ) while repeat outcomes are consistent.": (
             "固定条件下重复运行结果一致，但切换 TZ 时区环境变量时结果发生翻转。"
         ),
+        "Outcomes vary across runs or test orders due to unisolated file or port resources.": (
+            "因未隔离的文件路径或固定网络端口资源冲突，导致跨轮次或不同执行顺序下结果发生波动。"
+        ),
+        "Outcomes vary under repeated runs due to unmocked external network I/O.": (
+            "因存在未 Mock 拦截的外部网络请求，导致重复运行下结果发生波动或超时。"
+        ),
+        "Outcomes vary across hash seeds or repeated runs due to strict floating-point equality assertions.": (
+            "因对浮点数计算使用了严格相等断言，导致切换哈希种子或重复运行下发生精度翻转。"
+        ),
     }
     return mapping.get(text, text) + polluter_suffix
 
@@ -589,6 +607,34 @@ def _translate_hint_zh(hint):
     text = text.replace("accesses/mutates shared module-level state", "读写/修改了业务模块级共享状态")
     text = text.replace("accesses/mutates shared class-level attribute", "读写/修改了共享类属性")
     text = text.replace("(declared at ", "（声明于 ")
+    text = text.replace(
+        "operates on hardcoded file/database path via ",
+        "通过以下调用操作了硬编码的文件/数据库路径：",
+    )
+    text = text.replace(
+        " without `tmp_path` or `tempfile`",
+        "（未使用 `tmp_path` 或 `tempfile` 隔离）",
+    )
+    text = text.replace(
+        "binds hardcoded non-zero network port via ",
+        "通过以下调用绑定了硬编码的非零网络端口：",
+    )
+    text = text.replace(
+        "performs unmocked external network I/O via ",
+        "通过以下调用发起了未 Mock 拦截的外部网络请求：",
+    )
+    text = text.replace(
+        "asserts strict equality (`==`/`!=`) on floating-point values without `pytest.approx` or `math.isclose`",
+        "对浮点数计算结果使用了严格相等断言（`==`/`!=`），未使用 `pytest.approx` 或 `math.isclose`",
+    )
+    text = text.replace(
+        "asserts strict equality (`==`/`!=`) on floating-point return from ",
+        "对来自以下位置的浮点数返回值使用了严格相等断言（`==`/`!=`）：",
+    )
+    text = text.replace(
+        " without `pytest.approx` or `math.isclose`",
+        "（未使用 `pytest.approx` 或 `math.isclose`）",
+    )
     text = text.replace(" without a fixed seed", " 且未固定随机种子")
     text = text.replace(
         " without explicit timezone (`tz`) or time freeze",

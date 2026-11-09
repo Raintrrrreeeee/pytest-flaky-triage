@@ -1260,5 +1260,293 @@ def test_chinese_report_rendering_and_cli(tmp_path):
     assert "## 2. 测试诊断汇总表" in written
 
 
+def test_resource_leak_ast_heuristics_disambiguation_and_suppression(tmp_path):
+    """Verify AST detection, cross-file tracking, disambiguation, and tmp_path/port=0 suppression for resource_leak."""
+    src_dir = tmp_path / "src" / "storage"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "repo.py").write_text(
+        "from pathlib import Path\n"
+        "import socket\n"
+        "import sqlite3\n\n"
+        "class DataStore:\n"
+        "    def write_fixed_cache(self, payload):\n"
+        "        Path('cache.db').write_text(payload)\n"
+        "        conn = sqlite3.connect('local_state.sqlite')\n"
+        "        conn.close()\n\n"
+        "    def bind_fixed_port(self):\n"
+        "        s = socket.socket()\n"
+        "        s.bind(('127.0.0.1', 8080))\n"
+        "        return s\n\n"
+        "    def bind_ephemeral_port(self):\n"
+        "        s = socket.socket()\n"
+        "        s.bind(('127.0.0.1', 0))\n"
+        "        return s\n\n"
+        "    def memory_sqlite(self):\n"
+        "        return sqlite3.connect(':memory:')\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_resource.py").write_text(
+        "import tempfile\n"
+        "from pathlib import Path\n"
+        "from storage.repo import DataStore\n\n"
+        "def test_test_side_hardcoded_open():\n"
+        "    with open('temp_output.json', 'w') as f:\n"
+        "        f.write('{}')\n"
+        "    assert Path('temp_output.json').exists()\n\n"
+        "def test_code_side_file_and_sqlite_leak():\n"
+        "    store = DataStore()\n"
+        "    store.write_fixed_cache('hello')\n\n"
+        "def test_code_side_fixed_port_leak():\n"
+        "    store = DataStore()\n"
+        "    sock = store.bind_fixed_port()\n"
+        "    sock.close()\n\n"
+        "def test_suppressed_with_tmp_path(tmp_path):\n"
+        "    out = tmp_path / 'temp.json'\n"
+        "    out.write_text('ok')\n"
+        "    with open(out, 'w') as f:\n"
+        "        f.write('ok')\n\n"
+        "def test_suppressed_ephemeral_port_and_tempfile():\n"
+        "    store = DataStore()\n"
+        "    s = store.bind_ephemeral_port()\n"
+        "    conn = store.memory_sqlite()\n"
+        "    with tempfile.NamedTemporaryFile('w') as tf:\n"
+        "        tf.write('clean')\n"
+        "    s.close()\n"
+        "    conn.close()\n",
+        encoding="utf-8",
+    )
+
+    shared_cause = [
+        {
+            "candidates": ["shared_state_interference"],
+            "status": "suspected",
+            "reason": "Outcomes differ across test orders, or isolated executions pass while suite executions fail, with a consistent repeat baseline.",
+            "run_ids": [1, 2],
+        }
+    ]
+    ambiguous_cause = [
+        {
+            "candidates": ["unseeded_randomness", "race_conditions"],
+            "status": "ambiguous",
+            "reason": "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.",
+            "run_ids": [1, 2],
+        }
+    ]
+
+    info_test_file = inspect_test_source(
+        "tests/test_resource.py::test_test_side_hardcoded_open", project_dir=tmp_path
+    )
+    res_test_file = disambiguate_causes(shared_cause, info_test_file)
+    assert res_test_file["resolved_candidates"] == ["resource_leak"]
+    assert res_test_file["disambiguated"] is True
+    assert res_test_file["fault_side"] == "Test Side"
+    assert res_test_file["conflicting_hints"] == []
+
+    info_code_file = inspect_test_source(
+        "tests/test_resource.py::test_code_side_file_and_sqlite_leak", project_dir=tmp_path
+    )
+    res_code_file = disambiguate_causes(shared_cause, info_code_file)
+    assert res_code_file["resolved_candidates"] == ["resource_leak"]
+    assert res_code_file["disambiguated"] is True
+    assert res_code_file["fault_side"] == "Code Side"
+
+    info_code_port = inspect_test_source(
+        "tests/test_resource.py::test_code_side_fixed_port_leak", project_dir=tmp_path
+    )
+    res_code_port = disambiguate_causes(ambiguous_cause, info_code_port)
+    assert res_code_port["resolved_candidates"] == ["resource_leak"]
+    assert res_code_port["disambiguated"] is True
+    assert res_code_port["fault_side"] == "Code Side"
+
+    info_tmp_clean = inspect_test_source(
+        "tests/test_resource.py::test_suppressed_with_tmp_path", project_dir=tmp_path
+    )
+    assert info_tmp_clean["indicators"]["resource_leak"] == []
+
+    info_port0_clean = inspect_test_source(
+        "tests/test_resource.py::test_suppressed_ephemeral_port_and_tempfile", project_dir=tmp_path
+    )
+    assert info_port0_clean["indicators"]["resource_leak"] == []
+
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/test_resource.py::test_code_side_file_and_sqlite_leak"
+    diag["tests"][1]["suspected_causes"] = shared_cause
+    md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
+    assert "文件与端口资源冲突" in md_zh
+    assert "通过以下调用操作了硬编码的文件/数据库路径：" in md_zh
+    assert "operates on hardcoded" not in md_zh
+
+
+def test_external_io_ast_heuristics_disambiguation_and_mock_suppression(tmp_path):
+    """Verify AST detection, 3-hop Code Side attribution, and monkeypatch/@patch/responses suppression for external_io."""
+    src_dir = tmp_path / "src" / "net"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "client.py").write_text(
+        "import requests\n"
+        "import urllib.request\n\n"
+        "def _low_level_fetch(url):\n"
+        "    return requests.get(url, timeout=2)\n\n"
+        "class Gateway:\n"
+        "    def fetch_profile(self, uid):\n"
+        "        return _low_level_fetch(f'https://api.example.com/u/{uid}')\n\n"
+        "    def open_feed(self):\n"
+        "        return urllib.request.urlopen('https://example.com/feed.xml')\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_net.py").write_text(
+        "from unittest.mock import patch\n"
+        "import httpx\n"
+        "import responses\n"
+        "from net.client import Gateway\n\n"
+        "def test_test_side_httpx():\n"
+        "    resp = httpx.post('https://example.com/hook')\n"
+        "    assert resp.status_code == 200\n\n"
+        "def test_code_side_unmocked_requests():\n"
+        "    gw = Gateway()\n"
+        "    assert gw.fetch_profile(1) is not None\n\n"
+        "def test_suppressed_with_monkeypatch(monkeypatch):\n"
+        "    gw = Gateway()\n"
+        "    assert gw.fetch_profile(1) is not None\n\n"
+        "@patch('net.client.requests.get')\n"
+        "def test_suppressed_with_patch_decorator(mock_get):\n"
+        "    gw = Gateway()\n"
+        "    gw.fetch_profile(1)\n\n"
+        "@responses.activate\n"
+        "def test_suppressed_with_responses_decorator():\n"
+        "    gw = Gateway()\n"
+        "    gw.fetch_profile(1)\n",
+        encoding="utf-8",
+    )
+
+    ambiguous_cause = [
+        {
+            "candidates": ["unseeded_randomness", "race_conditions"],
+            "status": "ambiguous",
+            "reason": "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.",
+            "run_ids": [1, 2],
+        }
+    ]
+
+    info_test_io = inspect_test_source(
+        "tests/test_net.py::test_test_side_httpx", project_dir=tmp_path
+    )
+    res_test_io = disambiguate_causes(ambiguous_cause, info_test_io)
+    assert res_test_io["resolved_candidates"] == ["external_io"]
+    assert res_test_io["disambiguated"] is True
+    assert res_test_io["fault_side"] == "Test Side"
+
+    info_code_io = inspect_test_source(
+        "tests/test_net.py::test_code_side_unmocked_requests", project_dir=tmp_path
+    )
+    res_code_io = disambiguate_causes(ambiguous_cause, info_code_io)
+    assert res_code_io["resolved_candidates"] == ["external_io"]
+    assert res_code_io["disambiguated"] is True
+    assert res_code_io["fault_side"] == "Code Side"
+
+    for clean_name in (
+        "test_suppressed_with_monkeypatch",
+        "test_suppressed_with_patch_decorator",
+        "test_suppressed_with_responses_decorator",
+    ):
+        info_clean = inspect_test_source(f"tests/test_net.py::{clean_name}", project_dir=tmp_path)
+        assert info_clean["indicators"]["external_io"] == [], clean_name
+
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/test_net.py::test_code_side_unmocked_requests"
+    diag["tests"][1]["suspected_causes"] = ambiguous_cause
+    md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
+    assert "未隔离的外部网络依赖" in md_zh
+    assert "通过以下调用发起了未 Mock 拦截的外部网络请求：" in md_zh
+    assert "performs unmocked" not in md_zh
+
+
+def test_float_precision_ast_heuristics_disambiguation_and_approx_suppression(tmp_path):
+    """Verify AST detection, cross-file float return tracking, and pytest.approx/math.isclose/round suppression."""
+    src_dir = tmp_path / "src" / "pricing"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "calc.py").write_text(
+        "class TaxCalculator:\n"
+        "    def compute_taxed_total(self, amounts):\n"
+        "        return sum(amounts) * 1.07\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_float.py").write_text(
+        "import math\n"
+        "from decimal import Decimal\n"
+        "import pytest\n"
+        "from pricing.calc import TaxCalculator\n\n"
+        "def test_direct_float_literal_assert():\n"
+        "    total = 0.1 + 0.2\n"
+        "    assert total == 0.3\n\n"
+        "def test_cross_file_float_return_assert(expected_val):\n"
+        "    calc = TaxCalculator()\n"
+        "    res = calc.compute_taxed_total([10.1, 20.2])\n"
+        "    assert res == expected_val\n\n"
+        "def test_suppressed_with_pytest_approx():\n"
+        "    total = 0.1 + 0.2\n"
+        "    assert total == pytest.approx(0.3)\n\n"
+        "def test_suppressed_with_math_isclose_and_round():\n"
+        "    val = sum([0.1, 0.2])\n"
+        "    assert math.isclose(val, 0.3)\n"
+        "    assert round(val, 2) == 0.3\n"
+        "    assert Decimal('0.1') + Decimal('0.2') == Decimal('0.3')\n",
+        encoding="utf-8",
+    )
+
+    hash_cause = [
+        {
+            "candidates": ["hash_order_sensitivity"],
+            "status": "suspected",
+            "reason": "Outcomes differ across hash seeds while repeat outcomes are consistent.",
+            "run_ids": [1, 2],
+        }
+    ]
+
+    info_direct = inspect_test_source(
+        "tests/test_float.py::test_direct_float_literal_assert", project_dir=tmp_path
+    )
+    res_direct = disambiguate_causes(hash_cause, info_direct)
+    assert res_direct["resolved_candidates"] == ["float_precision"]
+    assert res_direct["disambiguated"] is True
+    assert res_direct["fault_side"] == "Test Side"
+    assert res_direct["conflicting_hints"] == []
+
+    info_cross = inspect_test_source(
+        "tests/test_float.py::test_cross_file_float_return_assert", project_dir=tmp_path
+    )
+    res_cross = disambiguate_causes(hash_cause, info_cross)
+    assert res_cross["resolved_candidates"] == ["float_precision"]
+    assert res_cross["disambiguated"] is True
+    assert res_cross["fault_side"] == "Test Side"
+
+    for clean_name in (
+        "test_suppressed_with_pytest_approx",
+        "test_suppressed_with_math_isclose_and_round",
+    ):
+        info_clean = inspect_test_source(f"tests/test_float.py::{clean_name}", project_dir=tmp_path)
+        assert info_clean["indicators"]["float_precision"] == [], clean_name
+
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/test_float.py::test_direct_float_literal_assert"
+    diag["tests"][1]["suspected_causes"] = hash_cause
+    md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
+    assert "浮点数精度断言隐患" in md_zh
+    assert "对浮点数计算结果使用了严格相等断言" in md_zh
+    assert "asserts strict equality" not in md_zh
+
+
+
 
 

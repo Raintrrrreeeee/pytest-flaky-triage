@@ -53,6 +53,9 @@
 
 在汇总表下方的诊断详情中，工具还会直接列出**疑似前置污染源测试**与**具体源码位置**：
 - **`shared_state_interference`（共享状态污染）**：`疑似前置污染源测试：test_new_cart_is_empty` -> `tests/test_cart.py:120 读写/修改了模块级共享对象 shared_test_cart（声明于 tests/test_cart.py:10）`
+- **`resource_leak`（文件与端口资源冲突）**：`src/storage/repo.py:8 通过以下调用操作了硬编码的文件/数据库路径：Path.write_text(...), sqlite3.connect(...)（未使用 tmp_path 或 tempfile 隔离）`
+- **`external_io`（未隔离的外部网络依赖）**：`src/net/client.py:5 通过以下调用发起了未 Mock 拦截的外部网络请求：requests.get(...)`
+- **`float_precision`（浮点数精度断言隐患）**：`tests/test_float.py:8 对浮点数计算结果使用了严格相等断言（==/!=），未使用 pytest.approx 或 math.isclose`
 - **`timezone_sensitivity`（时区/本地时间敏感）**：`src/ecommerce/cart.py:82 调用了 datetime.now() 且未显式指定时区 (tz) 或冻结时间`
 - **`unseeded_randomness`（未固定随机种子）**：`src/ecommerce/cart.py:57 调用了 random.choice(...) 且未固定随机种子`
 - **`race_conditions`（并发时间竞态）**：`src/ecommerce/cart.py:67, 71, 75 使用了未同步的并发/计时原语 (time.sleep, unjoined threading.Thread)`
@@ -83,8 +86,8 @@
   - 追踪测试类中的 `setup_method` / `setUp` 初始化逻辑与 `self.<attr>` 属性读写。
   - 同时覆盖 `Test Side` 测试模块共享变量/夹具污染与 `Code Side` 业务模块全局变量（含 `global` 关键字修改）及类属性污染。
 - **真实工程特征覆盖与防误报抑制**：
-  - 识别 `random.*`、`uuid.uuid4`、`secrets.*`、`os.urandom`、`numpy.random`、`threading.Thread`、`ThreadPoolExecutor` 线程池、`asyncio.gather`，以及未显式指定时区的本地时间调用（`datetime.now()`、`date.today()`、无 `tz` 的 `datetime.fromtimestamp(ts)`、`time.localtime()`、未搭配 `gmtime` 的 `time.strftime()`）。
-  - 自动排除已固定常量随机种子（如 `random.seed(42)`）、已排序集合（`sorted(...)`）、路径拼接（`os.path.join`）、显式状态重置函数（`reset_*` / `clear_*`）、显式指定时区参数（`tz=timezone.utc`、`time.gmtime`）以及时间冻结工具（`@freeze_time`、`freezegun`、`freezer` 夹具、`monkeypatch.setenv("TZ", ...)`）的安全代码。
+  - 识别 `random.*`、`uuid.uuid4`、`secrets.*`、`os.urandom`、`numpy.random`、`threading.Thread`、`ThreadPoolExecutor` 线程池、`asyncio.gather`、未显式指定时区的本地时间调用（`datetime.now()`、`date.today()`、无 `tz` 的 `datetime.fromtimestamp(ts)`、`time.localtime()`、未搭配 `gmtime` 的 `time.strftime()`）、硬编码文件/数据库路径读写与固定非零端口绑定（`open(..., "w")`、`Path(...).write_text()`、`sqlite3.connect("...")`、`.bind((host, 8080))` -> `resource_leak` 文件与端口资源冲突）、未 Mock 的外部网络调用（`requests.*`、`httpx.*`、`urllib.request.urlopen`、`aiohttp.ClientSession`、`socket.create_connection` -> `external_io` 未隔离的外部网络依赖），以及浮点数严格相等断言（对浮点数运算/`sum(...)`/除法直接写 `assert a == b` -> `float_precision` 浮点数精度断言隐患）。
+  - 自动排除已固定常量随机种子（如 `random.seed(42)`）、已排序集合（`sorted(...)`）、路径拼接（`os.path.join`）、显式状态重置函数（`reset_*` / `clear_*`）、显式指定时区参数（`tz=timezone.utc`、`time.gmtime`）、时间冻结工具（`@freeze_time`、`freezegun`、`freezer` 夹具、`monkeypatch.setenv("TZ", ...)`）、临时目录与动态端口（`tmp_path`、`tmpdir`、`tempfile.*`、`:memory:`、动态端口 `0`）、网络打桩拦截（`monkeypatch`、`mocker`、`@patch`、`responses`、`respx`、`httpretty`、`requests_mock`）以及安全近似比较（`pytest.approx`、`math.isclose`、`np.isclose`、`round`、`Decimal`）的安全代码。
 - **双格式可追溯输出**：同时生成供 CI/CD 流水线读取的 `diagnosis.json`（包含最终消歧结论 `resolution`）和供开发者阅读的 `report.md`（优先展示失败场次日志链接，并精确标注源码 `文件名:行号`）。
 
 ---
@@ -137,9 +140,9 @@ cat ./out/report.md
 
 ---
 
-### 方式二：克隆完整仓库（包含源码、演示靶场与 126 项自测套件）
+### 方式二：克隆完整仓库（包含源码、演示靶场与 129 项自测套件）
 
-如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 126 个自动化测试用例：
+如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 129 个自动化测试用例：
 
 **macOS / Linux：**
 ```bash
@@ -156,7 +159,7 @@ pytest-flaky-triage --demo --lang zh
 # 2. 查看生成的 Markdown 诊断报告：
 cat out/report.md
 
-# 3. 运行工具自身的 126 个单元与集成测试：
+# 3. 运行工具自身的 129 个单元与集成测试：
 bash scripts/test.sh
 ```
 
@@ -176,7 +179,7 @@ pytest-flaky-triage --demo --lang zh
 # 2. 查看生成的 Markdown 诊断报告：
 Get-Content -Encoding utf8 out\report.md
 
-# 3. 运行工具自身的 126 个单元与集成测试：
+# 3. 运行工具自身的 129 个单元与集成测试：
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 

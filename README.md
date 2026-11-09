@@ -53,6 +53,9 @@ Unlike simple rerun plugins (`pytest-repeat`, `pytest-flakefinder`, `pytest-rand
 
 Each diagnostic section further pinpoints the **polluting predecessor test** and **exact source line**:
 - **`shared_state_interference`**: `Suspected polluting predecessor(s): test_new_cart_is_empty` -> `tests/test_cart.py:120 accesses/mutates shared module-level object shared_test_cart (declared at tests/test_cart.py:10)`
+- **`resource_leak`**: `src/storage/repo.py:8 operates on hardcoded file/database path via Path.write_text(...), sqlite3.connect(...) without tmp_path or tempfile`
+- **`external_io`**: `src/net/client.py:5 performs unmocked external network I/O via requests.get(...)`
+- **`float_precision`**: `tests/test_float.py:8 asserts strict equality (==/!=) on floating-point values without pytest.approx or math.isclose`
 - **`timezone_sensitivity`**: `src/ecommerce/cart.py:82 calls datetime.now() without explicit timezone (tz) or time freeze`
 - **`unseeded_randomness`**: `src/ecommerce/cart.py:57 calls random.choice(...) without a fixed seed`
 - **`race_conditions`**: `src/ecommerce/cart.py:67, 71, 75 uses unsynchronized concurrency/timing primitives (time.sleep, unjoined threading.Thread)`
@@ -83,8 +86,8 @@ Each diagnostic section further pinpoints the **polluting predecessor test** and
   - Tracks test class `setup_method` / `setUp` initializations and `self.<attr>` references.
   - Detects both `Test Side` shared module/fixture state and `Code Side` production module global/class-attribute mutations.
 - **Broad Pattern Coverage with False-Positive Suppression**:
-  - Detects `random.*`, `uuid.uuid4`, `secrets.*`, `os.urandom`, `numpy.random`, `threading.Thread`, `ThreadPoolExecutor`, `asyncio.gather`, and naive local-time calls (`datetime.now()`, `date.today()`, `datetime.fromtimestamp(ts)` without `tz`, `time.localtime()`, `time.strftime()` without `gmtime`).
-  - Automatically suppresses false positives when deterministic seeds (`random.seed(42)`), sorted collections (`sorted(...)`), path joins (`os.path.join`), explicit state reset helpers (`reset_*` / `clear_*`), explicit timezone arguments (`tz=timezone.utc`, `time.gmtime`), or time-freeze tools (`@freeze_time`, `freezegun`, `freezer` fixture, `monkeypatch.setenv("TZ", ...)`) are present.
+  - Detects `random.*`, `uuid.uuid4`, `secrets.*`, `os.urandom`, `numpy.random`, `threading.Thread`, `ThreadPoolExecutor`, `asyncio.gather`, naive local-time calls (`datetime.now()`, `date.today()`, `datetime.fromtimestamp(ts)` without `tz`, `time.localtime()`, `time.strftime()` without `gmtime`), hardcoded file/database/port resource leaks (`open(..., "w")`, `Path(...).write_text()`, `sqlite3.connect("...")`, `.bind((host, 8080))` with `port != 0` -> `resource_leak`), unmocked external network calls (`requests.*`, `httpx.*`, `urllib.request.urlopen`, `aiohttp.ClientSession`, `socket.create_connection` -> `external_io`), and strict floating-point equality assertions (`assert a == b` on floats/`sum(...)`/division -> `float_precision`).
+  - Automatically suppresses false positives when deterministic seeds (`random.seed(42)`), sorted collections (`sorted(...)`), path joins (`os.path.join`), explicit state reset helpers (`reset_*` / `clear_*`), explicit timezone arguments (`tz=timezone.utc`, `time.gmtime`), time-freeze tools (`@freeze_time`, `freezegun`, `freezer` fixture, `monkeypatch.setenv("TZ", ...)`), isolated temporary paths (`tmp_path`, `tmpdir`, `tempfile.*`, `:memory:`, ephemeral port `0`), network mocks (`monkeypatch`, `mocker`, `@patch`, `responses`, `respx`, `httpretty`, `requests_mock`), or approximate float comparisons (`pytest.approx`, `math.isclose`, `np.isclose`, `round`, `Decimal`) are present.
 - **Actionable Outputs**: Generates both a machine-readable `diagnosis.json` (with persisted AST resolution fields for CI pipelines) and a human-readable `report.md` featuring failure-prioritized log links and `file:line` source hints.
 
 ---
@@ -139,7 +142,7 @@ pytest-flaky-triage --project ./scenario --out ./out --lang zh --report-only
 
 ### Mode 2: Full Repository Clone (Development, Demo & Self-Tests)
 
-If you want the full source tree, the `scenario/` benchmark suite, and the tool's 126-test verification suite in one place:
+If you want the full source tree, the `scenario/` benchmark suite, and the tool's 129-test verification suite in one place:
 
 **macOS / Linux:**
 ```bash
@@ -156,7 +159,7 @@ pytest-flaky-triage --demo
 # 2. Inspect the generated Markdown triage report:
 cat out/report.md
 
-# 3. Run the tool's own 126 unit and integration tests:
+# 3. Run the tool's own 129 unit and integration tests:
 bash scripts/test.sh
 ```
 
@@ -176,7 +179,7 @@ pytest-flaky-triage --demo
 # 2. Inspect the generated Markdown triage report:
 Get-Content -Encoding utf8 out\report.md
 
-# 3. Run the tool's own 126 unit and integration tests:
+# 3. Run the tool's own 129 unit and integration tests:
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 
@@ -253,7 +256,7 @@ scripts/
   lib/flaky_plugin.py    pytest sideband hook plugin, O(N) reorder, and process-group timeout controller
   lib/parse_log.awk      hardened AWK log-parser fallback
   demo.sh                runs the demonstration scenario end to end
-  test.sh                runs the tool's own 126-test verification suite
+  test.sh                runs the tool's own 129-test verification suite
 src/
   analysis/              Stage 2 stability scoring, root-cause inference, and polluter identification (`python -m analysis`)
   report/                Stage 3 AST source heuristics and Markdown triage report generator (`python -m report`)
