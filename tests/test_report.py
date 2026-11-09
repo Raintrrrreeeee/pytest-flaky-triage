@@ -756,6 +756,110 @@ def test_real_scenario_all_18_tests_correctly_classified():
         assert res["resolved_candidates"] == ["shared_state_interference"], name
         assert res["fault_side"] == "Test Side", name
 
+    tz_cause = [
+        {
+            "candidates": ["timezone_sensitivity"],
+            "status": "suspected",
+            "reason": "Outcomes differ across timezones (TZ) while repeat outcomes are consistent.",
+            "run_ids": [1, 25],
+        }
+    ]
+    for name in (
+        "test_daily_order_prefix_uses_utc_date",
+        "test_coupon_expiry_date_check",
+    ):
+        info = inspect_test_source(f"tests/test_cart.py::{name}", project_dir=scenario_dir)
+        res = disambiguate_causes(tz_cause, info)
+        assert res["resolved_candidates"] == ["timezone_sensitivity"], name
+        assert res["fault_side"] == "Code Side", name
+
+    for name in (
+        "test_receipt_timestamp_formatting",
+        "test_audit_log_date_tag",
+    ):
+        info = inspect_test_source(f"tests/test_cart.py::{name}", project_dir=scenario_dir)
+        res = disambiguate_causes(tz_cause, info)
+        assert res["resolved_candidates"] == ["timezone_sensitivity"], name
+        assert res["fault_side"] == "Test Side", name
+
+
+def test_timezone_ast_heuristics_and_suppression(tmp_path):
+    """Verify AST detection and false-positive suppression for timezone_sensitivity."""
+    src_dir = tmp_path / "src" / "billing"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "clock.py").write_text(
+        "from datetime import date, datetime, timezone\n"
+        "import time\n\n"
+        "class InvoiceClock:\n"
+        "    def naive_stamp(self):\n"
+        "        return datetime.now().strftime('%Y-%m-%d')\n\n"
+        "    def explicit_utc_stamp(self):\n"
+        "        return datetime.now(timezone.utc).strftime('%Y-%m-%d')\n\n"
+        "    def gmtime_stamp(self, ts):\n"
+        "        return time.strftime('%Y-%m-%d', time.gmtime(ts))\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_clock.py").write_text(
+        "from datetime import datetime, timezone\n"
+        "import time\n"
+        "from billing.clock import InvoiceClock\n\n"
+        "def test_code_side_tz():\n"
+        "    c = InvoiceClock()\n"
+        "    assert c.naive_stamp() == datetime.now(timezone.utc).strftime('%Y-%m-%d')\n\n"
+        "def test_test_side_tz():\n"
+        "    c = InvoiceClock()\n"
+        "    expected = datetime.fromtimestamp(1704067200).strftime('%Y-%m-%d')\n"
+        "    assert c.explicit_utc_stamp() == expected\n\n"
+        "def test_explicit_tz_clean():\n"
+        "    c = InvoiceClock()\n"
+        "    ts = datetime.fromtimestamp(1704067200, tz=timezone.utc).strftime('%Y-%m-%d')\n"
+        "    assert c.gmtime_stamp(1704067200) == ts\n\n"
+        "def test_frozen_time_suppressed(freezer):\n"
+        "    now_str = datetime.now().strftime('%Y-%m-%d')\n"
+        "    assert len(now_str) == 10\n",
+        encoding="utf-8",
+    )
+
+    tz_cause = [
+        {
+            "candidates": ["timezone_sensitivity"],
+            "status": "suspected",
+            "reason": "Outcomes differ across timezones (TZ) while repeat outcomes are consistent.",
+            "run_ids": [1, 2],
+        }
+    ]
+
+    info_code = inspect_test_source("tests/test_clock.py::test_code_side_tz", project_dir=tmp_path)
+    res_code = disambiguate_causes(tz_cause, info_code)
+    assert res_code["fault_side"] == "Code Side"
+    assert res_code["basis"] == "Runtime+AST"
+
+    info_test = inspect_test_source("tests/test_clock.py::test_test_side_tz", project_dir=tmp_path)
+    res_test = disambiguate_causes(tz_cause, info_test)
+    assert res_test["fault_side"] == "Test Side"
+    assert res_test["basis"] == "Runtime+AST"
+
+    info_clean = inspect_test_source("tests/test_clock.py::test_explicit_tz_clean", project_dir=tmp_path)
+    assert info_clean["indicators"]["timezone_sensitivity"] == []
+
+    info_frozen = inspect_test_source("tests/test_clock.py::test_frozen_time_suppressed", project_dir=tmp_path)
+    assert info_frozen["indicators"]["timezone_sensitivity"] == []
+
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/test_clock.py::test_code_side_tz"
+    diag["tests"][1]["suspected_causes"] = tz_cause
+    md_en = render_markdown(diag, project_dir=tmp_path, lang="en")
+    assert "`timezone_sensitivity`" in md_en
+    assert "without explicit timezone (`tz`) or time freeze" in md_en
+
+    md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
+    assert "时区/本地时间敏感" in md_zh
+    assert "且未显式指定时区（`tz`）或固定时间" in md_zh
+
 
 def test_parametrized_and_missing_source_degrade_gracefully(tmp_path):
     tests_dir = tmp_path / "tests"

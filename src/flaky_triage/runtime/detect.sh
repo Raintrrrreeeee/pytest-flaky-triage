@@ -6,6 +6,7 @@
 #   repeat    same order, PYTHONHASHSEED=0, N runs      -> randomness, races
 #   hashseed  same order, one run per hash seed         -> set/hash-order dependence
 #   order     reversed order + K seeded shuffles        -> order / shared state
+#   tz        same order, PYTHONHASHSEED=0, one per TZ  -> timezone / local-time dependence
 #   isolated  every test alone in its own process       -> shared state
 #
 # Compatible with Bash 3.2+ (macOS default) and Bash 5+ (Linux).
@@ -31,6 +32,7 @@ PROJECT=""
 REPEATS=10
 HASH_SEEDS="1 2 3 4 5 6 7 8"
 ORDERS=5
+TIMEZONES="UTC Pacific/Kiritimati America/Pago_Pago"
 ISOLATED=1
 ISOLATED_SCOPE="all"
 TIMEOUT=60
@@ -64,6 +66,8 @@ Options:
                              (default "$HASH_SEEDS")
   --orders K                 seeded shuffled-order runs, plus one reversed run;
                              0 to skip (default $ORDERS)
+  --timezones "TZ..."        TZ environment values, one run each; "" to skip
+                             (default "$TIMEZONES")
   --isolated N               runs of each test on its own; 0 to skip (default $ISOLATED)
   --isolated-scope MODE      'all' (every test) or 'smart' (only tests with
                              suite failures) (default $ISOLATED_SCOPE)
@@ -93,6 +97,10 @@ is_uint() {
     [[ $1 =~ ^[0-9]{1,9}$ ]]
 }
 
+is_tz() {
+    [[ $1 =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]]
+}
+
 # ---------------------------------------------------------------- arguments
 
 while [[ $# -gt 0 ]]; do
@@ -107,7 +115,7 @@ while [[ $# -gt 0 ]]; do
             set -- "$opt_name" "$opt_val" "$@"
             continue
             ;;
-        --project|--target|-k|--repeats|--hash-seeds|--orders|--isolated|--isolated-scope|--timeout|--out|--python|--lang)
+        --project|--target|-k|--repeats|--hash-seeds|--orders|--timezones|--isolated|--isolated-scope|--timeout|--out|--python|--lang)
             [[ $# -ge 2 ]] || die "$1 needs a value (see --help)"
             ;;
         *) die "unknown option '$1' (see --help)" ;;
@@ -119,6 +127,7 @@ while [[ $# -gt 0 ]]; do
         --repeats)        REPEATS=$2 ;;
         --hash-seeds)     HASH_SEEDS=$2 ;;
         --orders)         ORDERS=$2 ;;
+        --timezones)      TIMEZONES=$2 ;;
         --isolated)       ISOLATED=$2 ;;
         --isolated-scope) ISOLATED_SCOPE=$2 ;;
         --timeout)        TIMEOUT=$2 ;;
@@ -162,6 +171,15 @@ for seed in $HASH_SEEDS; do
 done
 set +f
 HASH_SEEDS="${SEED_ARR[*]:-}"
+
+TZ_ARR=()
+set -f
+for tz_val in $TIMEZONES; do
+    is_tz "$tz_val" || { set +f; die "--timezones values must be valid timezone identifiers (got '$tz_val')"; }
+    TZ_ARR+=("$tz_val")
+done
+set +f
+TIMEZONES="${TZ_ARR[*]:-}"
 
 # Reject symlinked output paths before creating directories so symlink targets
 # cannot be modified or cleaned.
@@ -369,6 +387,11 @@ run_one() {
         cd "$PROJECT"
         unset PYTEST_ADDOPTS
         export PYTHONHASHSEED=$hash_seed
+        if [[ $condition == tz ]]; then
+            export TZ="$value"
+        else
+            export TZ="UTC"
+        fi
         export PYTHONDONTWRITEBYTECODE=1
         export PYTHONPATH="$TARGET_PYTHONPATH"
         export TMPDIR="$CURRENT_RUN_TMP"
@@ -449,6 +472,7 @@ collect_rc=0
     cd "$PROJECT"
     unset PYTEST_ADDOPTS
     export PYTHONHASHSEED=0
+    export TZ=UTC
     export PYTHONDONTWRITEBYTECODE=1
     export PYTHONPATH="$TARGET_PYTHONPATH"
     export FLAKY_COLLECT_FILE="$COLLECT_TMP"
@@ -486,9 +510,10 @@ mkdir -p "$OUT_DIR/logs" "$OUT_DIR/orders"
 mv "$COLLECT_TMP" "$OUT_DIR/collected.txt"
 
 N_SEEDS=${#SEED_ARR[@]}
+N_TZS=${#TZ_ARR[@]}
 N_ORDER_RUNS=0
 [[ $ORDERS -gt 0 ]] && N_ORDER_RUNS=$((ORDERS + 1))
-N_RUNS=$((REPEATS + N_SEEDS + N_ORDER_RUNS + N_TESTS * ISOLATED))
+N_RUNS=$((REPEATS + N_SEEDS + N_ORDER_RUNS + N_TZS + N_TESTS * ISOLATED))
 say "collected $N_TESTS tests; planned $N_RUNS runs (timeout ${TIMEOUT}s each)"
 
 echo 'run_id,condition,condition_value,position,test_id,outcome' > "$OUT_DIR/results.csv"
@@ -522,6 +547,14 @@ if [[ $ORDERS -gt 0 ]]; then
     say "order:    $N_ORDER_RUNS runs done"
 fi
 
+if [[ $N_TZS -gt 0 ]]; then
+    for ((tz_idx = 0; tz_idx < N_TZS; tz_idx++)); do
+        tz_val=${TZ_ARR[$tz_idx]}
+        run_one tz "$tz_val" 0 "$COLLECTED" "$COLLECTED" ${EXTRA_COLLECT_ARGS[@]+"${EXTRA_COLLECT_ARGS[@]}"}
+    done
+    say "tz:       $N_TZS runs done"
+fi
+
 if [[ $ISOLATED -gt 0 ]]; then
     single=$OUT_DIR/orders/single.txt
     iso_candidates=$COLLECTED
@@ -529,7 +562,7 @@ if [[ $ISOLATED -gt 0 ]]; then
         iso_candidates=$OUT_DIR/orders/smart_isolated.txt
         awk -F',' '
             NR == 1 { next }
-            $NF != "passed" && $NF != "skipped" {
+            $2 != "tz" && $NF != "passed" && $NF != "skipped" {
                 line = $0
                 sub(/,[^,]*$/, "", line)
                 sub(/^[^,]*,[^,]*,("[^"]*"|[^,]*),[^,]*,/, "", line)

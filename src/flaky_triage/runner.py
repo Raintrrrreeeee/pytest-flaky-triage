@@ -43,6 +43,10 @@ def _is_uint(val):
     return bool(re.match(r"^[0-9]{1,9}$", str(val)))
 
 
+def _is_tz(val):
+    return bool(re.match(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$", str(val)))
+
+
 def _csv_quote(text):
     escaped = str(text).replace('"', '""')
     return f'"{escaped}"'
@@ -77,6 +81,8 @@ Options:
                              (default "1 2 3 4 5 6 7 8")
   --orders K                 seeded shuffled-order runs, plus one reversed run;
                              0 to skip (default 5)
+  --timezones "TZ..."        TZ environment values, one run each; "" to skip
+                             (default "UTC Pacific/Kiritimati America/Pago_Pago")
   --isolated N               runs of each test on its own; 0 to skip (default 1)
   --isolated-scope MODE      'all' (every test) or 'smart' (only tests with
                              suite failures) (default all)
@@ -315,6 +321,7 @@ def run_detect(argv=None):
     repeats_raw = "10"
     hash_seeds_raw = "1 2 3 4 5 6 7 8"
     orders_raw = "5"
+    timezones_raw = "UTC Pacific/Kiritimati America/Pago_Pago"
     isolated_raw = "1"
     isolated_scope = "all"
     timeout_raw = "60"
@@ -326,7 +333,7 @@ def run_detect(argv=None):
 
     value_opts = {
         "--project", "--target", "-k", "--repeats", "--hash-seeds",
-        "--orders", "--isolated", "--isolated-scope", "--timeout",
+        "--orders", "--timezones", "--isolated", "--isolated-scope", "--timeout",
         "--out", "--python", "--lang",
     }
 
@@ -365,6 +372,8 @@ def run_detect(argv=None):
             hash_seeds_raw = val
         elif tok == "--orders":
             orders_raw = val
+        elif tok == "--timezones":
+            timezones_raw = val
         elif tok == "--isolated":
             isolated_raw = val
         elif tok == "--isolated-scope":
@@ -412,6 +421,12 @@ def run_detect(argv=None):
         if not _is_uint(s_tok):
             return die(f"--hash-seeds values must be whole numbers 0..999999999 (got '{s_tok}')")
         seed_arr.append(int(s_tok, 10))
+
+    tz_arr = []
+    for tz_tok in timezones_raw.split():
+        if not _is_tz(tz_tok):
+            return die(f"--timezones values must be valid timezone identifiers (got '{tz_tok}')")
+        tz_arr.append(tz_tok)
 
     out_candidate = Path(out_raw)
     if out_candidate.is_symlink():
@@ -577,6 +592,7 @@ def run_detect(argv=None):
     c_env.pop("FLAKY_ORDER_FILE", None)
     c_env.pop("FLAKY_EVENTS_FILE", None)
     c_env["PYTHONHASHSEED"] = "0"
+    c_env["TZ"] = "UTC"
     c_env["PYTHONDONTWRITEBYTECODE"] = "1"
     c_env["PYTHONPATH"] = target_pythonpath
     c_env["FLAKY_COLLECT_FILE"] = str(collect_tmp)
@@ -645,8 +661,9 @@ def run_detect(argv=None):
 
     n_tests = len(collected_ids)
     n_seeds = len(seed_arr)
+    n_tzs = len(tz_arr)
     n_order_runs = (orders + 1) if orders > 0 else 0
-    n_runs = repeats + n_seeds + n_order_runs + n_tests * isolated
+    n_runs = repeats + n_seeds + n_order_runs + n_tzs + n_tests * isolated
     say(f"collected {n_tests} tests; planned {n_runs} runs (timeout {timeout_secs}s each)")
 
     results_csv = out_dir / "results.csv"
@@ -681,6 +698,7 @@ def run_detect(argv=None):
         r_env.pop("PYTEST_ADDOPTS", None)
         r_env.pop("FLAKY_COLLECT_FILE", None)
         r_env["PYTHONHASHSEED"] = str(hash_seed)
+        r_env["TZ"] = str(value) if condition == "tz" else "UTC"
         r_env["PYTHONDONTWRITEBYTECODE"] = "1"
         r_env["PYTHONPATH"] = target_pythonpath
         r_env["TMPDIR"] = str(tmp_run_dir)
@@ -780,6 +798,11 @@ def run_detect(argv=None):
             run_one("order", f"shuffle:{k}", 0, shuf_ids, shuf_file, extra_collect_args)
         say(f"order:    {n_order_runs} runs done")
 
+    if n_tzs > 0:
+        for tz_val in tz_arr:
+            run_one("tz", tz_val, 0, collected_ids, collected_file, extra_collect_args)
+        say(f"tz:       {n_tzs} runs done")
+
     if isolated > 0:
         single_file = out_dir / "orders" / "single.txt"
         iso_list = list(collected_ids)
@@ -788,7 +811,7 @@ def run_detect(argv=None):
             with results_csv.open(encoding="utf-8") as rstream:
                 reader = csv.DictReader(rstream)
                 for row in reader:
-                    if row["outcome"] not in ("passed", "skipped"):
+                    if row["condition"] != "tz" and row["outcome"] not in ("passed", "skipped"):
                         failed_set.add(row["test_id"])
             iso_list = [nid for nid in collected_ids if nid in failed_set]
         iso_count = 0
@@ -941,19 +964,19 @@ def run_demo(argv=None):
                     passed[(short, cond)] = passed.get((short, cond), 0) + 1
 
         sys.stdout.write(
-            f"  {'test':<46} {'expected':<15} {'repeat':>9} {'hashseed':>9} {'order':>9} {'isolated':>9}\n"
+            f"  {'test':<46} {'expected':<15} {'repeat':>9} {'hashseed':>9} {'order':>9} {'tz':>9} {'isolated':>9}\n"
         )
         for name in order_names:
             want = expected_map.get(name, "(not in key)")
             cells = []
-            for cond in ("repeat", "hashseed", "order", "isolated"):
+            for cond in ("repeat", "hashseed", "order", "tz", "isolated"):
                 key = (name, cond)
                 if key in totals:
                     cells.append(f"{passed.get(key, 0)}/{totals[key]}")
                 else:
                     cells.append("-")
             sys.stdout.write(
-                f"  {name:<46} {want:<15} {cells[0]:>9} {cells[1]:>9} {cells[2]:>9} {cells[3]:>9}\n"
+                f"  {name:<46} {want:<15} {cells[0]:>9} {cells[1]:>9} {cells[2]:>9} {cells[3]:>9} {cells[4]:>9}\n"
             )
 
     raw_lines = 0

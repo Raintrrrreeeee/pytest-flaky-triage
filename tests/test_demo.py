@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEMO = ROOT / "scripts" / "demo.sh"
 OUT = ROOT / "out" / "selftest" / "demo"
-CATEGORIES = {"hash_order", "randomness", "race_condition", "shared_state", "deterministic"}
+CATEGORIES = {"hash_order", "randomness", "race_condition", "shared_state", "timezone", "deterministic"}
 
 
 def test_demo_runs_and_every_scenario_test_is_in_the_answer_key():
@@ -24,7 +24,8 @@ def test_demo_runs_and_every_scenario_test_is_in_the_answer_key():
         cmd = ["bash", str(DEMO)]
     result = subprocess.run(
         [*cmd, "--out", str(OUT),
-         "--repeats", "2", "--hash-seeds", "1", "--orders", "1", "--isolated", "0"],
+         "--repeats", "2", "--hash-seeds", "1", "--orders", "1",
+         "--timezones", "UTC Pacific/Kiritimati", "--isolated", "0"],
         env=env,
         capture_output=True, text=True, timeout=300,
     )

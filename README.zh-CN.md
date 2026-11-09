@@ -15,8 +15,8 @@
 
 ```text
 +-------------------------------------------------------------------------+
-| 第一阶段：四维控制变量矩阵执行引擎 (scripts/detect.sh)                  |
-|   repeat（重复）-> hashseed（哈希）-> order（顺序）-> isolated（隔离）  |
+| 第一阶段：五维控制变量矩阵执行引擎 (scripts/detect.sh)                  |
+|   repeat（重复）-> hashseed（哈希）-> order（顺序）-> tz（时区）-> 隔离 |
 |   Pytest Sideband Hook 实时插件 + 进程组超时保护控制器                  |
 +------------------------------------+------------------------------------+
                                      |  results.csv & run_meta.csv
@@ -40,26 +40,30 @@
 ## 诊断报告输出预览（支持 `--lang zh` 中文报告）
 
 ```markdown
-| 测试名称                                 | 判定结果 | 稳定性得分   | 重复基线 (Repeat) | 哈希种子 (Hashseed) | 执行顺序 (Order) | 单测隔离 (Isolated) | 怀疑根因                                 | 责任归属           | 判定依据   |
-| :--------------------------------------- | :------: | :----------: | :---------------: | :-----------------: | :--------------: | :-----------------: | :--------------------------------------- | :----------------: | :--------- |
-| `test_taxes_format`                      | `flaky`  | 0.12 (3/25)  |       0/10        |         3/8         |       0/6        |         0/1         | `hash_order_sensitivity` (哈希顺序敏感)   | 测试侧 (Test Side) | 运行时+AST |
-| `test_shared_cart_has_no_prior_laptop`   | `flaky`  | 0.12 (3/25)  |       0/10        |         0/8         |       2/6        |         1/1         | `shared_state_interference` (共享状态污染) | 测试侧 (Test Side) | 运行时+AST |
-| `test_get_daily_quote`                   | `flaky`  | 0.16 (4/25)  |       2/10        |         2/8         |       0/6        |         0/1         | `unseeded_randomness` (未固定随机种子)    | 业务侧 (Code Side) | AST 消歧 * |
-| `test_checkout_deducts_mouse`            | `flaky`  | 0.44 (11/25) |       4/10        |         4/8         |       2/6        |         1/1         | `race_conditions` (并发时间竞态)          | 业务侧 (Code Side) | AST 消歧 * |
-| `test_add_item_to_cart_is_deterministic` | `stable` | 1.00 (25/25) |       10/10       |         8/8         |       6/6        |         1/1         | —                                        |         —          | —          |
+| 测试名称                                 | 判定结果 | 稳定性得分   | 重复基线 (Repeat) | 哈希种子 (Hashseed) | 执行顺序 (Order) | 时区扰动 (Timezone) | 单测隔离 (Isolated) | 怀疑根因                                 | 责任归属           | 判定依据   |
+| :--------------------------------------- | :------: | :----------: | :---------------: | :-----------------: | :--------------: | :-----------------: | :-----------------: | :--------------------------------------- | :----------------: | :--------- |
+| `test_taxes_format`                      | `flaky`  | 0.14 (4/28)  |       0/10        |         4/8         |       0/6        |         0/3         |         0/1         | `hash_order_sensitivity` (哈希顺序敏感)   | 测试侧 (Test Side) | 运行时+AST |
+| `test_shared_cart_has_no_prior_laptop`   | `flaky`  | 0.14 (4/28)  |       0/10        |         0/8         |       3/6        |         0/3         |         1/1         | `shared_state_interference` (共享状态污染) | 测试侧 (Test Side) | 运行时+AST |
+| `test_daily_order_prefix_uses_utc_date`  | `flaky`  | 0.93 (26/28) |       10/10       |         8/8         |       6/6        |         1/3         |         1/1         | `timezone_sensitivity` (时区/本地时间敏感) | 业务侧 (Code Side) | 运行时+AST |
+| `test_receipt_timestamp_formatting`      | `flaky`  | 0.93 (26/28) |       10/10       |         8/8         |       6/6        |         1/3         |         1/1         | `timezone_sensitivity` (时区/本地时间敏感) | 测试侧 (Test Side) | 运行时+AST |
+| `test_get_daily_quote`                   | `flaky`  | 0.25 (7/28)  |       3/10        |         2/8         |       1/6        |         1/3         |         0/1         | `unseeded_randomness` (未固定随机种子)    | 业务侧 (Code Side) | AST 消歧 * |
+| `test_checkout_deducts_mouse`            | `flaky`  | 0.46 (13/28) |       5/10        |         4/8         |       2/6        |         1/3         |         1/1         | `race_conditions` (并发时间竞态)          | 业务侧 (Code Side) | AST 消歧 * |
+| `test_add_item_to_cart_is_deterministic` | `stable` | 1.00 (28/28) |       10/10       |         8/8         |       6/6        |         3/3         |         1/1         | —                                        |         —          | —          |
 ```
 
 在汇总表下方的诊断详情中，工具还会直接列出**疑似前置污染源测试**与**具体源码位置**：
-- **`shared_state_interference`（共享状态污染）**：`疑似前置污染源测试：test_new_cart_is_empty` -> `tests/test_cart.py:123 读写/修改了模块级共享对象 shared_test_cart（声明于 tests/test_cart.py:7）`
-- **`unseeded_randomness`（未固定随机种子）**：`src/ecommerce/cart.py:56 调用了 random.choice(...) 且未固定随机种子`
-- **`race_conditions`（并发时间竞态）**：`src/ecommerce/cart.py:66, 70, 74 使用了未同步的并发/计时原语 (time.sleep, unjoined threading.Thread)`
+- **`shared_state_interference`（共享状态污染）**：`疑似前置污染源测试：test_new_cart_is_empty` -> `tests/test_cart.py:120 读写/修改了模块级共享对象 shared_test_cart（声明于 tests/test_cart.py:10）`
+- **`timezone_sensitivity`（时区/本地时间敏感）**：`src/ecommerce/cart.py:82 调用了 datetime.now() 且未显式指定时区 (tz) 或冻结时间`
+- **`unseeded_randomness`（未固定随机种子）**：`src/ecommerce/cart.py:57 调用了 random.choice(...) 且未固定随机种子`
+- **`race_conditions`（并发时间竞态）**：`src/ecommerce/cart.py:67, 71, 75 使用了未同步的并发/计时原语 (time.sleep, unjoined threading.Thread)`
 
 ---
 
 ## 核心功能亮点
 
-### 第一阶段：四维控制变量矩阵执行引擎（`flaky_triage.runner`、`scripts/detect.sh` & `flaky_plugin.py`）
-- **单因子正交实验设计**：在四个正交维度（固定条件重复 `repeat`、切换哈希种子 `hashseed`、打乱执行顺序 `order`、单测独立运行 `isolated`）下运行目标测试套件，每次只改变一个变量，从实验设计层面隔离不同根因。
+### 第一阶段：五维控制变量矩阵执行引擎（`flaky_triage.runner`、`scripts/detect.sh` & `flaky_plugin.py`）
+- **单因子正交实验设计**：在五个正交维度（固定条件重复 `repeat`、切换哈希种子 `hashseed`、打乱执行顺序 `order`、切换极端时区 `tz`、单测独立运行 `isolated`）下运行目标测试套件，每次只改变一个变量，从实验设计层面隔离不同根因。
+- **跨时区环境扰动（`tz`）**：默认在跨越 25 小时时间窗的三个极端时区（`UTC`、`Pacific/Kiritimati` UTC+14、`America/Pago_Pago` UTC-11）下运行测试，并在 `flaky_plugin.py` 启动时自动调用 `time.tzset()`，无论在一天中的任何时刻运行，都能稳定暴露隐式本地时间与跨日边界缺陷。
 - **内置 Pytest Sideband Hook 插件**：直接挂载 `pytest` 生命周期钩子（`setup` / `call` / `teardown`），将每个测试的真实执行结果实时写入独立的结构化数据流，不受目标项目 `pytest.ini` 配置（如 `-q` 静默输出、进度条插件、多行报错堆栈、带空格或特殊符号的参数化测试名）干扰；同时保留加固版日志解析器作为兜底。
 - **内存级 `O(N)` 顺序重排与冲突插件屏蔽**：在 `pytest_collection_modifyitems` 阶段按指定顺序文件直接重排测试，并自动屏蔽目标环境中可能干扰实验控制的第三方插件（如 `pytest-randomly`、`pytest-xdist`、`pytest-sugar`、`pytest-cov`、`pytest-rerunfailures`、`pytest-order`）。
 - **macOS / Linux / Windows 跨平台进程树超时保护**：每次运行均在独立进程组中启动并关闭 `stdin`，超时后自动清理整棵进程树（退出码 `124`），在 **macOS、Linux 与 Windows（PowerShell / CMD / Git Bash）** 下均可防止死循环或残留后台线程卡死终端。
@@ -79,8 +83,8 @@
   - 追踪测试类中的 `setup_method` / `setUp` 初始化逻辑与 `self.<attr>` 属性读写。
   - 同时覆盖 `Test Side` 测试模块共享变量/夹具污染与 `Code Side` 业务模块全局变量（含 `global` 关键字修改）及类属性污染。
 - **真实工程特征覆盖与防误报抑制**：
-  - 识别 `random.*`、`uuid.uuid4`、`secrets.*`、`os.urandom`、`numpy.random`、`threading.Thread`、`ThreadPoolExecutor` 线程池、`asyncio.gather` 等常见模式。
-  - 自动排除已固定常量随机种子（如 `random.seed(42)`）、已排序集合（`sorted(...)`）、路径拼接（`os.path.join`）以及显式调用了状态重置函数（`reset_*` / `clear_*`）的安全代码。
+  - 识别 `random.*`、`uuid.uuid4`、`secrets.*`、`os.urandom`、`numpy.random`、`threading.Thread`、`ThreadPoolExecutor` 线程池、`asyncio.gather`，以及未显式指定时区的本地时间调用（`datetime.now()`、`date.today()`、无 `tz` 的 `datetime.fromtimestamp(ts)`、`time.localtime()`、未搭配 `gmtime` 的 `time.strftime()`）。
+  - 自动排除已固定常量随机种子（如 `random.seed(42)`）、已排序集合（`sorted(...)`）、路径拼接（`os.path.join`）、显式状态重置函数（`reset_*` / `clear_*`）、显式指定时区参数（`tz=timezone.utc`、`time.gmtime`）以及时间冻结工具（`@freeze_time`、`freezegun`、`freezer` 夹具、`monkeypatch.setenv("TZ", ...)`）的安全代码。
 - **双格式可追溯输出**：同时生成供 CI/CD 流水线读取的 `diagnosis.json`（包含最终消歧结论 `resolution`）和供开发者阅读的 `report.md`（优先展示失败场次日志链接，并精确标注源码 `文件名:行号`）。
 
 ---
@@ -116,26 +120,26 @@ pytest-flaky-triage --project C:\path\to\your\project --out .\triage-out --lang 
 
 #### 可选步骤：按需单独下载 `scenario/` 官方演示靶场练手
 
-如果你已经用上面的 `pip install` 安装好了命令，想先用官方自带的 18 个缺陷测试靶场（`scenario/`）熟悉一下工具输出，只需执行以下几行命令单独拉取 `scenario/` 文件夹即可：
+如果你已经用上面的 `pip install` 安装好了命令，想先用官方自带的 22 个缺陷测试靶场（`scenario/`）熟悉一下工具输出，只需执行以下几行命令单独拉取 `scenario/` 文件夹即可：
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/Raintrrrreeeee/pytest-flaky-triage.git flaky-demo
 cd flaky-demo
 git sparse-checkout set --no-cone /scenario /docs
 
-# 使用已安装的 CLI 工具检测下载好的 scenario 靶场（约 10 秒，也可直接跑 pytest-flaky-triage --demo --lang zh）：
+# 使用已安装的 CLI 工具检测下载好的 scenario 靶场（约 12 秒，也可直接跑 pytest-flaky-triage --demo --lang zh）：
 pytest-flaky-triage --project ./scenario --out ./out --lang zh
 cat ./out/report.md
 
-# 若已跑完英文版想秒切中文版（无需重跑 42 轮 pytest）：
+# 若已跑完英文版想秒切中文版（无需重跑 pytest）：
 # pytest-flaky-triage --project ./scenario --out ./out --lang zh --report-only
 ```
 
 ---
 
-### 方式二：克隆完整仓库（包含源码、演示靶场与 121 项自测套件）
+### 方式二：克隆完整仓库（包含源码、演示靶场与 126 项自测套件）
 
-如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 121 个自动化测试用例：
+如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 126 个自动化测试用例：
 
 **macOS / Linux：**
 ```bash
@@ -146,13 +150,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pip install -e .
 
-# 1. 一键运行内置的 18 个测试演示靶场（约 10 秒跑完 42 轮矩阵，可通过 --lang zh 输出中文报告）：
+# 1. 一键运行内置的 22 个测试演示靶场（约 12 秒，可通过 --lang zh 输出中文报告）：
 pytest-flaky-triage --demo --lang zh
 
 # 2. 查看生成的 Markdown 诊断报告：
 cat out/report.md
 
-# 3. 运行工具自身的 121 个单元与集成测试：
+# 3. 运行工具自身的 126 个单元与集成测试：
 bash scripts/test.sh
 ```
 
@@ -166,13 +170,13 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 pip install -r requirements.txt
 pip install -e .
 
-# 1. 一键运行内置的 18 个测试演示靶场（约 10 秒跑完 42 轮矩阵，可通过 --lang zh 输出中文报告）：
+# 1. 一键运行内置的 22 个测试演示靶场（约 12 秒，可通过 --lang zh 输出中文报告）：
 pytest-flaky-triage --demo --lang zh
 
 # 2. 查看生成的 Markdown 诊断报告：
 Get-Content -Encoding utf8 out\report.md
 
-# 3. 运行工具自身的 121 个单元与集成测试：
+# 3. 运行工具自身的 126 个单元与集成测试：
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 
@@ -186,14 +190,15 @@ pytest-flaky-triage --project PATH [options]
 scripts/detect.sh --project PATH [options]
 ```
 
-四个实验条件各自只改变一个影响因子，保持其余条件恒定：
+五个实验条件各自只改变一个影响因子，保持其余条件恒定：
 
 | 实验条件 (`Condition`) | 改变的变量 | 保持固定的变量 | 用于暴露的缺陷类型 |
 |---|---|---|---|
-| `repeat` | 不改变任何条件，原样重复执行 | 测试执行顺序、`PYTHONHASHSEED=0` | 未固定种子的随机数（`unseeded_randomness`）、并发时间竞态（`race_conditions`） |
-| `hashseed` | 逐轮切换 `PYTHONHASHSEED` | 测试执行顺序 | 无序集合/字典哈希迭代顺序敏感（`hash_order_sensitivity`） |
-| `order` | 逆序 + 多组固定种子的随机打乱顺序 | `PYTHONHASHSEED=0` | 测试执行顺序依赖、共享状态污染（`shared_state_interference`） |
-| `isolated` | 每个测试在独立子进程中单独运行 | `PYTHONHASHSEED=0` | 共享状态干扰（被污染受害者 或 缺失初始化的状态依赖者） |
+| `repeat` | 不改变任何条件，原样重复执行 | 测试执行顺序、`PYTHONHASHSEED=0`、`TZ=UTC` | 未固定种子的随机数（`unseeded_randomness`）、并发时间竞态（`race_conditions`） |
+| `hashseed` | 逐轮切换 `PYTHONHASHSEED` | 测试执行顺序、`TZ=UTC` | 无序集合/字典哈希迭代顺序敏感（`hash_order_sensitivity`） |
+| `order` | 逆序 + 多组固定种子的随机打乱顺序 | `PYTHONHASHSEED=0`、`TZ=UTC` | 测试执行顺序依赖、共享状态污染（`shared_state_interference`） |
+| `tz` | 切换 `TZ` 环境变量（`UTC`、`Pacific/Kiritimati`、`America/Pago_Pago`） | 测试执行顺序、`PYTHONHASHSEED=0` | 本地时间与跨日边界敏感（`timezone_sensitivity`） |
+| `isolated` | 每个测试在独立子进程中单独运行 | `PYTHONHASHSEED=0`、`TZ=UTC` | 共享状态干扰（被污染受害者 或 缺失初始化的状态依赖者） |
 
 ### 参数列表
 
@@ -205,6 +210,7 @@ scripts/detect.sh --project PATH [options]
 | `--repeats N` | `10` | `repeat` 基准重复运行轮数（`N >= 1`） |
 | `--hash-seeds "S..."` | `"1 2 3 4 5 6 7 8"` | `PYTHONHASHSEED` 种子列表，每个种子运行一轮；传 `""` 可跳过 |
 | `--orders K` | `5` | `order` 阶段随机打乱顺序的轮数（外加 1 轮完全逆序）；传 `0` 可跳过 |
+| `--timezones "TZ..."` | `"UTC Pacific/Kiritimati America/Pago_Pago"` | `tz` 阶段时区列表，每个时区运行一轮；传 `""` 可跳过 |
 | `--isolated N` | `1` | 每个测试单独隔离运行的轮数；传 `0` 可跳过 |
 | `--isolated-scope MODE` | `all` | `all` 对所有测试执行单测隔离；`smart` 仅对前面套件运行中出现失败或波动的测试执行隔离 |
 | `--timeout SECONDS` | `60` | 单轮 `pytest` 运行的最大超时秒数 |
@@ -241,13 +247,14 @@ scripts/detect.sh --project PATH [options]
 
 ## 内置基准演示靶场（`scenario/`）
 
-仓库内置了一个可选的**电商购物车与结账模拟系统**（位于 `scenario/src/ecommerce/` 与 `scenario/tests/test_cart.py`），包含 4 大类典型不稳定测试与 2 个稳定对照组（共 18 个测试，详细标准答案见 [docs/scenario.md](docs/scenario.md)）：
+仓库内置了一个可选的**电商购物车与结账模拟系统**（位于 `scenario/src/ecommerce/` 与 `scenario/tests/test_cart.py`），包含 5 大类典型不稳定测试与 2 个稳定对照组（共 22 个测试，详细标准答案见 [docs/scenario.md](docs/scenario.md)）：
 
 1. **哈希顺序敏感（`hash_order_sensitivity`，Test Side 测试侧，4 个测试）**：测试代码直接将无序的 Python `set` 集合用 `",".join(...)` 拼接成字符串并与固定顺序的字符串做相等断言，在不同 `PYTHONHASHSEED` 下结果翻转。
 2. **未固定种子的随机性（`unseeded_randomness`，Code Side 业务侧，4 个测试）**：业务方法内部调用了未固定种子的 `random.choice(...)`，而测试断言其返回值等于某一个固定选项。
 3. **并发竞态条件（`race_conditions`，Code Side 业务侧，4 个测试）**：`Cart.checkout()` 启动了后台 `threading.Thread` 线程异步扣减库存但未调用 `join()` 等待完成，与测试中紧随其后的库存断言产生时间竞态。
-4. **共享状态互相污染（`shared_state_interference`，Test Side 测试侧，4 个测试）**：两组测试直接修改模块级共享购物车对象（`shared_test_cart` 与 `secondary_shared_cart`）且未清理，导致结果随执行顺序翻转，而在单测隔离下全部通过。
-5. **确定性稳定对照（`stable`，2 个测试）**：完全使用局部状态、同步确定性逻辑的正常测试，在全部 42 轮运行中 100% 通过。
+4. **共享状态互相污染（`shared_state_interference`，Test Side 测试侧，4 个测试）**：两组测试直接修改模块级共享购物车对象（`shared_test_cart`）且未清理，导致结果随执行顺序翻转，而在单测隔离下全部通过。
+5. **时区与本地时间敏感（`timezone_sensitivity`，2 个业务侧 & 2 个测试侧，共 4 个测试）**：业务代码或测试代码混用了未显式指定时区的本地时间（`datetime.now()`、`date.today()`、无 `tz` 的 `datetime.fromtimestamp(ts)`、`time.localtime(ts)`）与 UTC 时间预期，在跨越 25 小时时间窗的极端时区（`UTC`、`Pacific/Kiritimati`、`America/Pago_Pago`）扰动下发生结果翻转。
+6. **确定性稳定对照（`stable`，2 个测试）**：完全使用局部状态、同步确定性逻辑的正常测试，在全部实验条件下 100% 通过。
 
 ## 致谢（Acknowledgements）
 
