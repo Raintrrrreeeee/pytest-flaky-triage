@@ -42,6 +42,7 @@ def detect(*args):
         (["--project", GOOD_PROJECT, "--orders", "1.5"], "--orders must be"),
         (["--project", GOOD_PROJECT, "--timeout", "0"], "--timeout must be"),
         (["--project", GOOD_PROJECT, "--hash-seeds", "1 two"], "--hash-seeds values"),
+        (["--project", GOOD_PROJECT, "--timezones", "UTC bad;tz"], "--timezones values"),
         (["--project", GOOD_PROJECT, "--out", "/"], "--out must not be / or HOME"),
         (["--project", GOOD_PROJECT, "--out", str(ROOT)], "--out must be a sub-folder"),
         (["--project", GOOD_PROJECT, "--isolated-scope", "invalid"], "--isolated-scope must be"),
@@ -152,7 +153,7 @@ def test_output_folder_containing_the_project_is_rejected():
 def test_leading_zero_numbers_are_decimal():
     # 08 is not valid octal; Bash arithmetic would reject it without 10#
     result = detect("--project", GOOD_PROJECT, "--out", OUT, "--no-report",
-                    "--repeats", "08", "--hash-seeds", "", "--orders", "0", "--isolated", "0")
+                    "--repeats", "08", "--hash-seeds", "", "--orders", "0", "--timezones", "", "--isolated", "0")
     assert result.returncode == 0, result.stderr
     assert "planned 8 runs" in result.stderr
 

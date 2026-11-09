@@ -1,5 +1,8 @@
 """Flaky test suite for the e-commerce cart scenario."""
 
+from datetime import datetime, timezone
+import time
+
 from ecommerce.cart import Cart
 from ecommerce.inventory import deduct_inventory, get_stock, reset_stock
 
@@ -135,6 +138,40 @@ def test_shared_cart_only_contains_added_monitor():
     """Passes alone; fails if test_single_item_in_shared_cart ran first."""
     shared_test_cart.add_item("monitor", 1)
     assert shared_test_cart.items["monitor"] == 1
+
+
+# =====================================================================
+# Category 5: Timezone / Local-Time Sensitivity (2 Code Side, 2 Test Side)
+# =====================================================================
+
+def test_daily_order_prefix_uses_utc_date():
+    """Flaky across timezones due to naive datetime.now() in production code."""
+    cart = Cart("user_tz_prefix")
+    expected_prefix = datetime.now(timezone.utc).strftime("ORD-%Y%m%d")
+    assert cart.generate_daily_order_prefix() == expected_prefix
+
+
+def test_coupon_expiry_date_check():
+    """Flaky across timezones due to local date.today() in production code."""
+    cart = Cart("user_tz_coupon")
+    utc_today = datetime.now(timezone.utc).date()
+    assert cart.is_flash_coupon_active(utc_today) is True
+
+
+def test_receipt_timestamp_formatting():
+    """Flaky across timezones due to naive datetime.fromtimestamp() in test."""
+    cart = Cart("user_tz_receipt")
+    epoch = 1704067200
+    expected = datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
+    assert cart.format_receipt_timestamp(epoch) == expected
+
+
+def test_audit_log_date_tag():
+    """Flaky across timezones due to local time.localtime() in test."""
+    cart = Cart("user_tz_audit")
+    epoch = 1704150000
+    expected = time.strftime("%Y-%m-%d", time.localtime(epoch))
+    assert cart.format_audit_date_tag(epoch) == expected
 
 
 # =====================================================================

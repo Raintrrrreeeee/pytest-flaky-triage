@@ -21,6 +21,13 @@ import random
 import signal
 import subprocess
 import sys
+import time
+
+if hasattr(time, "tzset"):
+    try:
+        time.tzset()
+    except OSError:
+        pass
 
 _STATE = {
     "collect_file": None,
@@ -51,6 +58,11 @@ def _emit_event(payload):
 
 def pytest_configure(config):
     """Pop FLAKY_* env vars immediately so subprocesses spawned by tests are clean."""
+    if hasattr(time, "tzset"):
+        try:
+            time.tzset()
+        except OSError:
+            pass
     collect_file = os.environ.pop("FLAKY_COLLECT_FILE", None)
     order_file = os.environ.pop("FLAKY_ORDER_FILE", None)
     events_file = os.environ.pop("FLAKY_EVENTS_FILE", None)

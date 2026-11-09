@@ -5,7 +5,7 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-CONDITIONS = ("repeat", "hashseed", "order", "isolated")
+CONDITIONS = ("repeat", "hashseed", "order", "tz", "isolated")
 OUTCOMES = ("passed", "failed", "error", "skipped", "xfailed", "xpassed", "timeout", "not_run")
 RESULT_FIELDS = ("run_id", "condition", "condition_value", "position", "test_id", "outcome")
 META_FIELDS = (
@@ -52,6 +52,9 @@ def _condition(row):
         if not value.startswith("shuffle:"):
             raise InputError("order condition_value must be reverse or shuffle:N")
         _integer(value.removeprefix("shuffle:"), "shuffle seed")
+    elif condition == "tz":
+        if not value.strip() or any(ch.isspace() for ch in value):
+            raise InputError("tz condition_value must be a non-empty timezone identifier")
 
 
 def load_records(results_path, meta_path=None):

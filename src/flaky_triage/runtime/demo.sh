@@ -145,13 +145,13 @@ if [[ -f $ANSWER_KEY ]]; then
             if (outcome == "passed") passed[name, condition]++
         }
         END {
-            printf "  %-46s %-15s %9s %9s %9s %9s\n", "test", "expected", "repeat", "hashseed", "order", "isolated"
-            split("repeat hashseed order isolated", cond, " ")
+            printf "  %-46s %-15s %9s %9s %9s %9s %9s\n", "test", "expected", "repeat", "hashseed", "order", "tz", "isolated"
+            split("repeat hashseed order tz isolated", cond, " ")
             for (i = 1; i <= n_tests; i++) {
                 name = order[i]
                 want = (name in expected) ? expected[name] : "(not in key)"
                 printf "  %-46s %-15s", name, want
-                for (c = 1; c <= 4; c++) {
+                for (c = 1; c <= 5; c++) {
                     key = name SUBSEP cond[c]
                     cell = (key in total) ? (passed[key] + 0) "/" total[key] : "-"
                     printf " %9s", cell

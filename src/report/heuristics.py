@@ -255,6 +255,71 @@ def _is_sorted_arg(arg_node):
     )
 
 
+def _call_has_tz_arg(call_node, pos_index=0):
+    """Return True if call_node supplies a non-None positional or keyword `tz` argument."""
+    if len(call_node.args) > pos_index:
+        arg = call_node.args[pos_index]
+        if not (isinstance(arg, ast.Constant) and arg.value is None):
+            return True
+    for kw in call_node.keywords:
+        if kw.arg in ("tz", "tzinfo"):
+            if not (isinstance(kw.value, ast.Constant) and kw.value.value is None):
+                return True
+    return False
+
+
+def _strftime_uses_gmtime(call_node):
+    """Return True if time.strftime(fmt, t) explicitly passes a gmtime(...) tuple."""
+    if len(call_node.args) >= 2:
+        sec_arg = call_node.args[1]
+        if isinstance(sec_arg, ast.Call):
+            if isinstance(sec_arg.func, ast.Name) and sec_arg.func.id == "gmtime":
+                return True
+            if isinstance(sec_arg.func, ast.Attribute) and sec_arg.func.attr == "gmtime":
+                return True
+    return False
+
+
+def _has_time_freeze_or_tz_override(func_node):
+    """Return True if func_node uses freeze_time/freezer or monkeypatches TZ/datetime/time."""
+    for dec in getattr(func_node, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        if isinstance(target, ast.Name) and target.id == "freeze_time":
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == "freeze_time":
+            return True
+    for arg in getattr(func_node.args, "args", []):
+        if arg.arg in ("freezer", "freeze_time"):
+            return True
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                ctx = item.context_expr
+                if isinstance(ctx, ast.Call):
+                    fn = ctx.func
+                    if isinstance(fn, ast.Name) and fn.id == "freeze_time":
+                        return True
+                    if isinstance(fn, ast.Attribute) and fn.attr == "freeze_time":
+                        return True
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "monkeypatch":
+                if (
+                    node.func.attr == "setenv"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "TZ"
+                ):
+                    return True
+                if node.func.attr == "setattr" and node.args:
+                    for arg in node.args[:2]:
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            if any(tok in arg.value for tok in ("datetime", "date", "time")):
+                                return True
+                        elif isinstance(arg, ast.Name) and arg.id in ("datetime", "date", "time"):
+                            return True
+    return False
+
+
 def _scan_function_signals(func_node, file_rel, side):
     """Scan a function/method AST and coalesce static indicators per function.
 
@@ -267,14 +332,17 @@ def _scan_function_signals(func_node, file_rel, side):
         "race_conditions": [],
         "hash_order_sensitivity": [],
         "shared_state_interference": [],
+        "timezone_sensitivity": [],
         "returns_set": False,
     }
     raw_random = []
     raw_race = []
     raw_sleep = []
     raw_join = []
+    raw_tz = []
 
     fixed_seed = _has_fixed_seed_call(func_node)
+    has_time_freeze = _has_time_freeze_or_tz_override(func_node)
 
     # Check for @lru_cache / @cache decorators on Code Side functions
     for dec in getattr(func_node, "decorator_list", []):
@@ -334,6 +402,15 @@ def _scan_function_signals(func_node, file_rel, side):
             if isinstance(node.value.func, ast.Name) and node.value.func.id == "set":
                 signals["returns_set"] = True
 
+        if (
+            not has_time_freeze
+            and isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "time"
+            and node.attr == "tzname"
+        ):
+            raw_tz.append((node.lineno, "time.tzname"))
+
         if isinstance(node, ast.Call):
             spawn_prim = _is_worker_spawn_call(node)
             if spawn_prim is not None:
@@ -369,6 +446,21 @@ def _scan_function_signals(func_node, file_rel, side):
                     raw_race.append((node.lineno, f"`{mod_or_obj}.{attr}(...)`"))
                 elif mod_or_obj == "time" and attr == "sleep":
                     raw_sleep.append((node.lineno, "`time.sleep`"))
+                elif not has_time_freeze:
+                    if mod_or_obj == "datetime" and attr == "now" and not _call_has_tz_arg(node, 0):
+                        raw_tz.append((node.lineno, "datetime.now()"))
+                    elif mod_or_obj == "datetime" and attr == "today":
+                        raw_tz.append((node.lineno, "datetime.today()"))
+                    elif mod_or_obj == "date" and attr == "today":
+                        raw_tz.append((node.lineno, "date.today()"))
+                    elif mod_or_obj == "datetime" and attr == "fromtimestamp" and not _call_has_tz_arg(node, 1):
+                        raw_tz.append((node.lineno, "datetime.fromtimestamp(...)"))
+                    elif mod_or_obj == "date" and attr == "fromtimestamp":
+                        raw_tz.append((node.lineno, "date.fromtimestamp(...)"))
+                    elif mod_or_obj == "time" and attr in ("localtime", "mktime", "asctime", "ctime"):
+                        raw_tz.append((node.lineno, f"time.{attr}(...)"))
+                    elif mod_or_obj == "time" and attr == "strftime" and not _strftime_uses_gmtime(node):
+                        raw_tz.append((node.lineno, "time.strftime(...)"))
             elif (
                 isinstance(node.func, ast.Attribute)
                 and isinstance(node.func.value, ast.Attribute)
@@ -377,6 +469,26 @@ def _scan_function_signals(func_node, file_rel, side):
                 and node.func.value.attr == "random"
             ):
                 raw_random.append((node.lineno, f"{node.func.value.value.id}.random.{node.func.attr}(...)"))
+            elif (
+                not has_time_freeze
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Attribute)
+                and isinstance(node.func.value.value, ast.Name)
+                and node.func.value.value.id == "datetime"
+                and node.func.value.attr in ("datetime", "date")
+            ):
+                cls_name = node.func.value.attr
+                attr = node.func.attr
+                if cls_name == "datetime" and attr == "now" and not _call_has_tz_arg(node, 0):
+                    raw_tz.append((node.lineno, "datetime.now()"))
+                elif cls_name == "datetime" and attr == "today":
+                    raw_tz.append((node.lineno, "datetime.today()"))
+                elif cls_name == "date" and attr == "today":
+                    raw_tz.append((node.lineno, "date.today()"))
+                elif cls_name == "datetime" and attr == "fromtimestamp" and not _call_has_tz_arg(node, 1):
+                    raw_tz.append((node.lineno, "datetime.fromtimestamp(...)"))
+                elif cls_name == "date" and attr == "fromtimestamp":
+                    raw_tz.append((node.lineno, "date.fromtimestamp(...)"))
             elif isinstance(node.func, ast.Name):
                 fn = node.func.id
                 if fn in RANDOM_FUNCTIONS and not fixed_seed:
@@ -387,6 +499,19 @@ def _scan_function_signals(func_node, file_rel, side):
                     raw_race.append((node.lineno, f"`{fn}(...)`"))
                 elif fn == "sleep":
                     raw_sleep.append((node.lineno, "`sleep`"))
+                elif not has_time_freeze:
+                    if fn in ("localtime", "mktime", "asctime", "ctime"):
+                        raw_tz.append((node.lineno, f"time.{fn}(...)"))
+                    elif fn == "strftime" and not _strftime_uses_gmtime(node):
+                        raw_tz.append((node.lineno, "time.strftime(...)"))
+
+            if (
+                not has_time_freeze
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "astimezone"
+                and not _call_has_tz_arg(node, 0)
+            ):
+                raw_tz.append((node.lineno, ".astimezone()"))
 
             # Order-sensitive string join in test (requires an argument, e.g. ",".join(items),
             # excluding os.path.join and ",".join(sorted(...)))
@@ -434,6 +559,16 @@ def _scan_function_signals(func_node, file_rel, side):
             "side": "Test Side",
             "location": f"{file_rel}:{lines_str}",
             "detail": "unsorted `join(...)` on iterable",
+        })
+
+    if raw_tz:
+        raw_tz.sort(key=lambda item: item[0])
+        lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order([ln for ln, _ in raw_tz]))
+        calls_str = ", ".join(f"`{c}`" for c in _dedup_preserve_order([c for _, c in raw_tz]))
+        signals["timezone_sensitivity"].append({
+            "side": side,
+            "location": f"{file_rel}:{lines_str}",
+            "detail": f"calls {calls_str} without explicit timezone (`tz`) or time freeze",
         })
 
     return signals
@@ -565,6 +700,7 @@ def inspect_test_source(test_id, project_dir=None):
             "race_conditions": [],
             "hash_order_sensitivity": [],
             "shared_state_interference": [],
+            "timezone_sensitivity": [],
         },
     }
     if not project_dir:
@@ -599,6 +735,7 @@ def inspect_test_source(test_id, project_dir=None):
         "race_conditions": [],
         "hash_order_sensitivity": [],
         "shared_state_interference": [],
+        "timezone_sensitivity": [],
     }
 
     # Scan the test function itself (Test Side)
@@ -722,6 +859,7 @@ def inspect_test_source(test_id, project_dir=None):
         indicators["unseeded_randomness"].extend(code_signals["unseeded_randomness"])
         indicators["race_conditions"].extend(code_signals["race_conditions"])
         indicators["shared_state_interference"].extend(code_signals["shared_state_interference"])
+        indicators["timezone_sensitivity"].extend(code_signals["timezone_sensitivity"])
 
         # Code Side shared module-level state (only when func doesn't already have an unsynchronized
         # thread race and the module's state wasn't explicitly reset by the test)
@@ -871,6 +1009,7 @@ ALL_CAUSE_CATEGORIES = (
     "race_conditions",
     "hash_order_sensitivity",
     "shared_state_interference",
+    "timezone_sensitivity",
 )
 
 

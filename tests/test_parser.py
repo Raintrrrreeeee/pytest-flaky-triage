@@ -19,7 +19,7 @@ FIXTURES = ROOT / "tests" / "fixtures" / "parser"
 SELFTEST_OUT = ROOT / "out" / "selftest"
 
 # One plain run only, so expected.csv describes run 1.
-SINGLE_RUN = ["--repeats", "1", "--hash-seeds", "", "--orders", "0", "--isolated", "0"]
+SINGLE_RUN = ["--repeats", "1", "--hash-seeds", "", "--orders", "0", "--timezones", "", "--isolated", "0"]
 
 # case -> (extra detect.sh options, expected exit code)
 CASES = {
@@ -115,13 +115,14 @@ def test_outcomes_agree_across_all_conditions(case):
         "repeat": 2,
         "hashseed": 2,
         "order": 3,  # reversed + 2 shuffles
+        "tz": 3,
         "isolated": len(expected),
     }
 
 
 def test_shuffled_runs_keep_every_test_once():
     result, out_dir = run_detect(
-        "param_ids", "--repeats", "1", "--hash-seeds", "", "--orders", "3", "--isolated", "0",
+        "param_ids", "--repeats", "1", "--hash-seeds", "", "--orders", "3", "--timezones", "", "--isolated", "0",
         out_name="param_ids_orders",
     )
     assert result.returncode == 0, result.stderr

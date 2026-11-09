@@ -2,8 +2,8 @@
 
 The target module is an **E-commerce Cart and Checkout System** (`scenario/src/ecommerce/`). This system handles operations such as adding items to a shopping cart, returning applied promotional discounts and preferences, selecting promotional banners/avatars, processing asynchronous inventory deductions during checkout, and querying stock states.
 
-The scenario test suite (`scenario/tests/test_cart.py`) contains **18 tests in total**:
-- **16 intentionally flaky tests** (4 tests for each of the 4 flakiness categories).
+The scenario test suite (`scenario/tests/test_cart.py`) contains **22 tests in total**:
+- **20 intentionally flaky tests** (4 tests for each of the 5 flakiness categories).
 - **2 deterministic control tests** (guaranteed to pass 100% of the time under all conditions).
 
 ---
@@ -80,6 +80,24 @@ The scenario test suite (`scenario/tests/test_cart.py`) contains **18 tests in t
 
 ---
 
+## Category 5: Timezone / Local-Time Sensitivity (`TZ`) -> Code Side & Test Side (4 tests)
+
+**Context:** Production methods and tests format dates or timestamps across timezone boundaries (`generate_daily_order_prefix()`, `is_flash_coupon_active()`, `format_receipt_timestamp()`, `format_audit_date_tag()`).
+**Flaky Behavior:**
+- **Code Side (2 tests):** `Cart.generate_daily_order_prefix()` calls naive `datetime.now()` and `Cart.is_flash_coupon_active()` calls local `date.today()`, while the tests compare against explicit UTC dates (`datetime.now(timezone.utc)`).
+- **Test Side (2 tests):** `Cart.format_receipt_timestamp()` and `Cart.format_audit_date_tag()` format epoch timestamps in explicit UTC (`tz=timezone.utc`), while the tests compute expected strings using local-time `datetime.fromtimestamp(epoch)` (without `tz`) or `time.localtime(epoch)`.
+
+**Why it fails:** Under a fixed timezone (`TZ=UTC`), repeat, hashseed, order, and isolated runs are 100% consistent. When `TZ` is perturbed across extreme offsets (`UTC`, `Pacific/Kiritimati` at UTC+14, and `America/Pago_Pago` at UTC-11, spanning a 25-hour window), local calendar dates and wall-clock hours diverge from UTC at every instant of the day.
+
+| Test Name | Method Tested | Fault Side | Expected Category |
+| :--- | :--- | :--- | :--- |
+| `test_daily_order_prefix_uses_utc_date` | `Cart.generate_daily_order_prefix()` | Code Side | `timezone` |
+| `test_coupon_expiry_date_check` | `Cart.is_flash_coupon_active()` | Code Side | `timezone` |
+| `test_receipt_timestamp_formatting` | `Cart.format_receipt_timestamp()` | Test Side | `timezone` |
+| `test_audit_log_date_tag` | `Cart.format_audit_date_tag()` | Test Side | `timezone` |
+
+---
+
 ## Control Group: Deterministic Tests (2 tests)
 
 **Context:** Isolated, synchronous operations on a local `Cart` instance and a dedicated inventory key (`"tablet"`).
@@ -98,3 +116,4 @@ The scenario test suite (`scenario/tests/test_cart.py`) contains **18 tests in t
 - **Category 2 (Randomness -> Code Side):** Production methods that use `random.choice` should accept an optional seed/RNG parameter or deterministic selection strategy, or tests should mock `random.choice`.
 - **Category 3 (Race Condition -> Code Side):** `Cart.checkout()` spawns an unjoined background thread, or tests assert immediately without synchronization. Fix by joining/awaiting completion or providing a completion event/polling mechanism.
 - **Category 4 (Shared State -> Test Side):** Tests mutate the module-level `shared_test_cart` without resetting it. Fix by using a fresh `Cart` fixture per test or adding an `autouse` fixture that clears `shared_test_cart.items.clear()` before each test.
+- **Category 5 (Timezone Sensitivity -> Code Side & Test Side):** Production methods and tests mix naive local time (`datetime.now()`, `date.today()`, `datetime.fromtimestamp(ts)`, `time.localtime(ts)`) with UTC expectations. Fix by passing explicit timezone objects (`tz=timezone.utc` / `time.gmtime`) or freezing time in tests.

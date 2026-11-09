@@ -1,5 +1,6 @@
 """Shopping cart logic exhibiting intentional flakiness patterns."""
 
+from datetime import date, datetime, timezone
 import random
 import threading
 import time
@@ -74,3 +75,20 @@ class Cart:
             time.sleep(0.0002)
 
         return {"status": "processing", "message": "Checkout started in background"}
+
+    # Category 5: Timezone / local-time sensitivity (2 Code Side, 2 Test Side helpers)
+    def generate_daily_order_prefix(self) -> str:
+        """Generate a daily order prefix using naive local datetime.now()."""
+        return datetime.now().strftime("ORD-%Y%m%d")
+
+    def is_flash_coupon_active(self, valid_on_utc_date: date) -> bool:
+        """Check if a flash coupon is active today using local date.today()."""
+        return date.today() == valid_on_utc_date
+
+    def format_receipt_timestamp(self, epoch_seconds: int) -> str:
+        """Format an epoch timestamp in UTC for receipts."""
+        return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+    def format_audit_date_tag(self, epoch_seconds: int) -> str:
+        """Format an epoch timestamp as a UTC date tag for audit logs."""
+        return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).strftime("%Y-%m-%d")

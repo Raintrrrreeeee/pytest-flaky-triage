@@ -9,7 +9,8 @@ import unicodedata
 
 from .heuristics import disambiguate_causes, inspect_test_source
 
-CONDITIONS = ("repeat", "hashseed", "order", "isolated")
+CONDITIONS = ("repeat", "hashseed", "order", "tz", "isolated")
+REQUIRED_CONDITIONS = ("repeat", "hashseed", "order", "isolated")
 OUTCOMES = ("passed", "failed", "error", "skipped", "xfailed", "xpassed", "timeout", "not_run")
 VALID_OUTCOMES = ("passed", "failed", "error")
 EXCLUDED_OUTCOMES = ("skipped", "xfailed", "xpassed")
@@ -21,6 +22,7 @@ CANDIDATES = {
     "race_conditions",
     "hash_order_sensitivity",
     "shared_state_interference",
+    "timezone_sensitivity",
 }
 VERDICT_ORDER = {
     "flaky": 0,
@@ -31,8 +33,9 @@ VERDICT_ORDER = {
 CATEGORY_ORDER = {
     ("hash_order_sensitivity",): 0,
     ("shared_state_interference",): 1,
-    ("unseeded_randomness",): 2,
-    ("race_conditions",): 3,
+    ("timezone_sensitivity",): 2,
+    ("unseeded_randomness",): 3,
+    ("race_conditions",): 4,
 }
 RATE_TOLERANCE = 1e-6
 
@@ -245,9 +248,13 @@ def validate_diagnosis(data):
         observed_verdicts[test["overall"]["verdict"]] += 1
 
         conds = test["conditions"]
-        if not isinstance(conds, dict) or set(conds.keys()) != set(CONDITIONS):
-            raise ReportContractError(f"tests[{idx}].conditions must contain all four conditions")
-        for c_name in CONDITIONS:
+        if (
+            not isinstance(conds, dict)
+            or not set(REQUIRED_CONDITIONS).issubset(conds.keys())
+            or not set(conds.keys()).issubset(CONDITIONS)
+        ):
+            raise ReportContractError(f"tests[{idx}].conditions must contain all required conditions")
+        for c_name in conds:
             _validate_summary_block(
                 conds[c_name], f"tests[{idx}].conditions.{c_name}", min_valid=min_valid
             )
@@ -478,9 +485,9 @@ def _item_sort_key(item):
     v_rank = VERDICT_ORDER.get(verdict, 9)
     cands = tuple(res["resolved_candidates"])
     if not cands:
-        c_rank = 5
+        c_rank = 6
     else:
-        c_rank = CATEGORY_ORDER.get(cands, 4)
+        c_rank = CATEGORY_ORDER.get(cands, 5)
     score = test["overall"]["stability_score"]
     s_rank = score if score is not None else -1.0
     return (v_rank, c_rank, s_rank, test["test_id"])
@@ -510,6 +517,7 @@ def generate_report(diagnosis, project_dir=None):
 _ZH_CAUSE_LABELS = {
     "hash_order_sensitivity": "哈希顺序敏感",
     "shared_state_interference": "共享状态污染",
+    "timezone_sensitivity": "时区/本地时间敏感",
     "unseeded_randomness": "未固定随机种子",
     "race_conditions": "并发时间竞态",
 }
@@ -555,6 +563,9 @@ def _translate_reason_zh(reason):
         "Outcomes differ across test orders, or isolated executions differ from suite executions, with a consistent repeat baseline.": (
             "重复运行基线一致，但改变测试执行顺序或单测隔离运行时结果与套件运行不一致。"
         ),
+        "Outcomes differ across timezones (TZ) while repeat outcomes are consistent.": (
+            "固定条件下重复运行结果一致，但切换 TZ 时区环境变量时结果发生翻转。"
+        ),
     }
     return mapping.get(text, text) + polluter_suffix
 
@@ -579,6 +590,10 @@ def _translate_hint_zh(hint):
     text = text.replace("accesses/mutates shared class-level attribute", "读写/修改了共享类属性")
     text = text.replace("(declared at ", "（声明于 ")
     text = text.replace(" without a fixed seed", " 且未固定随机种子")
+    text = text.replace(
+        " without explicit timezone (`tz`) or time freeze",
+        " 且未显式指定时区（`tz`）或固定时间",
+    )
     text = text.replace("calls ", "调用了 ")
     text = text.replace("uses unsynchronized concurrency/timing primitives", "使用了未同步的并发/计时原语")
     text = text.replace("uses timing sleep", "使用了固定时长等待")
@@ -645,7 +660,7 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
         ]
         s2_headers = [
             "测试名称", "判定结果", "稳定性得分", "重复基线 (Repeat)", "哈希种子 (Hashseed)",
-            "执行顺序 (Order)", "单测隔离 (Isolated)", "怀疑根因", "责任归属", "判定依据",
+            "执行顺序 (Order)", "时区扰动 (Timezone)", "单测隔离 (Isolated)", "怀疑根因", "责任归属", "判定依据",
         ]
     else:
         lines = [
@@ -669,11 +684,11 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
         ]
         s2_headers = [
             "Test", "Verdict", "Score", "Repeat", "Hashseed",
-            "Order", "Isolated", "Suspected Cause", "Fault Side", "Basis",
+            "Order", "Timezone", "Isolated", "Suspected Cause", "Fault Side", "Basis",
         ]
     s2_alignments = [
         "left", "center", "center", "center", "center",
-        "center", "center", "left", "center", "left",
+        "center", "center", "center", "left", "center", "left",
     ]
     s2_rows = []
     any_disambiguated = False
@@ -692,6 +707,7 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
         rep_cell = _fmt_cond_cell(conds["repeat"])
         hash_cell = _fmt_cond_cell(conds["hashseed"])
         ord_cell = _fmt_cond_cell(conds["order"])
+        tz_cell = _fmt_cond_cell(conds.get("tz", {}))
         iso_cell = _fmt_cond_cell(conds["isolated"])
 
         resolved_cands = res["resolved_candidates"]
@@ -721,6 +737,7 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
             rep_cell,
             hash_cell,
             ord_cell,
+            tz_cell,
             iso_cell,
             cause_str,
             side_str,

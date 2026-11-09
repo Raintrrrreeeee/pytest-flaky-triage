@@ -56,7 +56,7 @@ def _find_suspected_polluters(test_id, usable_rows, precedents_by_run):
     full-suite runs, but did not precede it when it passed."""
     suite_rows = [
         r for r in usable_rows
-        if r["condition"] in ("repeat", "hashseed", "order")
+        if r["condition"] in ("repeat", "hashseed", "order", "tz")
         and r.get("position") is not None
     ]
     failed_runs = [r for r in suite_rows if r["outcome"] != "passed"]
@@ -131,11 +131,13 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
 
     hash_rows = groups["hashseed"]
     order_rows = groups["order"]
+    tz_rows = groups["tz"]
     isolated = groups["isolated"]
     suite = [r for r in usable if r["condition"] in ("repeat", "order")]
 
     hash_effect = _between_values(hash_rows, baseline=repeat)
     order_effect = _between_values(order_rows, baseline=repeat)
+    tz_effect = _between_values(tz_rows, baseline=repeat)
 
     # Bidirectional isolation effect:
     # 1. Polluted victim: fails in suite, passes when isolated
@@ -153,25 +155,26 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
     isolation_effect = victim_isolation or consumer_isolation
 
     # Guard against small-sample repeat non-flips on probabilistic tests:
-    # 1. If a test flips under BOTH hashseed (fixed order) AND order (fixed seed=0)
-    #    in a multi-seed/multi-order matrix (len(repeat) >= 5), a single-factor
-    #    hash or order bug cannot explain both; or
+    # 1. If a test flips across two or more independent single-factor perturbations
+    #    (hashseed, order, tz) in a multi-run matrix (len(repeat) >= 5), a single-factor
+    #    bug cannot explain both; or
     # 2. If a test has only a single rare failure across a full matrix (>= 10 usable
-    #    runs) without an isolation recovery effect.
+    #    runs) without an isolation recovery effect or deterministic timezone flip.
     total_nonpassing = sum(r["outcome"] != "passed" for r in usable)
     total_passing = sum(r["outcome"] == "passed" for r in usable)
     rare_single_flip = (
         len(usable) >= 10
         and min(total_nonpassing, total_passing) == 1
         and not isolation_effect
+        and not tz_effect
     )
-    dual_perturbation_flip = (
+    single_perturbation_flips = sum([bool(hash_effect), bool(order_effect), bool(tz_effect)])
+    multi_perturbation_flip = (
         len(repeat) >= 5
-        and hash_effect
-        and order_effect
+        and single_perturbation_flips >= 2
         and not victim_isolation
     )
-    if rare_single_flip or dual_perturbation_flip:
+    if rare_single_flip or multi_perturbation_flip:
         add(
             ["unseeded_randomness", "race_conditions"],
             "Outcomes were uniform during the finite repeat window but flipped across independent perturbations; source investigation is needed to distinguish probabilistic randomness or concurrency races.",
@@ -204,6 +207,12 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
             reason,
             repeat + order_rows + isolated,
             polluters=polluters,
+        )
+    if tz_effect:
+        add(
+            ["timezone_sensitivity"],
+            "Outcomes differ across timezones (TZ) while repeat outcomes are consistent.",
+            repeat + tz_rows,
         )
     return causes
 
