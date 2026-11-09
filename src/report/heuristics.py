@@ -37,6 +37,44 @@ CACHE_DECORATORS = {"lru_cache", "cache"}
 SETUP_METHODS = {
     "setup_method", "teardown_method", "setup_class", "teardown_class", "setUp", "tearDown",
 }
+TMP_FIXTURE_NAMES = {"tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory"}
+TEMPFILE_SAFE_MODULES = {"tempfile"}
+TEMPFILE_SAFE_CALLS = {
+    "NamedTemporaryFile", "TemporaryDirectory", "SpooledTemporaryFile",
+    "TemporaryFile", "mkstemp", "mkdtemp", "gettempdir",
+    "StringIO", "BytesIO",
+}
+PATH_MUTATION_METHODS = {
+    "write_text", "write_bytes", "mkdir", "unlink", "rmdir", "touch", "rename", "replace",
+}
+OS_FS_MUTATION_FUNCS = {
+    "remove", "unlink", "mkdir", "makedirs", "rmdir", "rename", "replace",
+}
+SHUTIL_MUTATION_FUNCS = {"rmtree", "copy", "copy2", "copytree", "move"}
+PORT_BIND_SERVER_CLASSES = {
+    "HTTPServer", "ThreadingHTTPServer", "TCPServer", "UDPServer",
+    "ThreadingTCPServer", "ThreadingUDPServer", "WSGIServer",
+}
+PORT_BIND_FUNCS = {"start_server", "create_server", "make_server"}
+NET_MOCK_NAMES = {
+    "monkeypatch", "mocker", "patch", "responses", "respx", "respx_mock",
+    "httpretty", "requests_mock", "MagicMock", "AsyncMock", "Mock",
+}
+REQUESTS_HTTPX_METHODS = {
+    "get", "post", "put", "delete", "patch", "head", "options", "request",
+    "stream", "Session", "Client", "AsyncClient",
+}
+URLLIB_REQUEST_FUNCS = {"urlopen", "urlretrieve"}
+AIOHTTP_TARGETS = {"ClientSession", "request"}
+SOCKET_NET_FUNCS = {"create_connection"}
+SMTPLIB_TARGETS = {"SMTP", "SMTP_SSL"}
+FLOAT_SAFE_FUNCS = {
+    "approx", "isclose", "allclose", "round", "Decimal", "assertAlmostEqual",
+}
+MATH_FLOAT_FUNCS = {
+    "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "exp", "log", "log10", "log2", "pow", "fsum", "hypot", "radians", "degrees",
+}
 
 
 @lru_cache(maxsize=512)
@@ -320,7 +358,183 @@ def _has_time_freeze_or_tz_override(func_node):
     return False
 
 
-def _scan_function_signals(func_node, file_rel, side):
+def _has_tmp_fixture_in_nodes(func_nodes):
+    """Return True if any function node declares a pytest temporary directory fixture parameter."""
+    for fn in func_nodes:
+        args_obj = getattr(fn, "args", None)
+        if args_obj is None:
+            continue
+        for arg in getattr(args_obj, "args", []) + getattr(args_obj, "kwonlyargs", []):
+            if arg.arg in TMP_FIXTURE_NAMES:
+                return True
+    return False
+
+
+def _has_network_mock_in_nodes(func_nodes, enclosing_cls=None):
+    """Return True if test/fixture functions or enclosing class setup/decorators mock network I/O."""
+    for fn in func_nodes:
+        for dec in getattr(fn, "decorator_list", []):
+            for sub in ast.walk(dec):
+                if isinstance(sub, ast.Name) and sub.id in NET_MOCK_NAMES:
+                    return True
+                if isinstance(sub, ast.Attribute) and sub.attr in NET_MOCK_NAMES:
+                    return True
+        args_obj = getattr(fn, "args", None)
+        if args_obj is not None:
+            for arg in getattr(args_obj, "args", []) + getattr(args_obj, "kwonlyargs", []):
+                if arg.arg in NET_MOCK_NAMES:
+                    return True
+        for sub in ast.walk(fn):
+            if isinstance(sub, ast.Name) and sub.id in NET_MOCK_NAMES:
+                return True
+            if isinstance(sub, ast.Attribute) and sub.attr in NET_MOCK_NAMES:
+                return True
+
+    if enclosing_cls is not None:
+        for dec in getattr(enclosing_cls, "decorator_list", []):
+            for sub in ast.walk(dec):
+                if isinstance(sub, ast.Name) and sub.id in NET_MOCK_NAMES:
+                    return True
+                if isinstance(sub, ast.Attribute) and sub.attr in NET_MOCK_NAMES:
+                    return True
+        for item in getattr(enclosing_cls, "body", []):
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in SETUP_METHODS:
+                for sub in ast.walk(item):
+                    if isinstance(sub, ast.Name) and sub.id in NET_MOCK_NAMES:
+                        return True
+                    if isinstance(sub, ast.Attribute) and sub.attr in NET_MOCK_NAMES:
+                        return True
+    return False
+
+
+def _is_safe_temp_expr(expr, safe_tmp_vars):
+    """Return True if expr derives from tmp_path, tmpdir, tempfile, StringIO/BytesIO, or :memory:."""
+    if expr is None:
+        return True
+    for sub in ast.walk(expr):
+        if isinstance(sub, ast.Name):
+            if (
+                sub.id in safe_tmp_vars
+                or sub.id in TMP_FIXTURE_NAMES
+                or sub.id in TEMPFILE_SAFE_MODULES
+                or sub.id in TEMPFILE_SAFE_CALLS
+            ):
+                return True
+        elif isinstance(sub, ast.Attribute):
+            if sub.attr in TEMPFILE_SAFE_CALLS or sub.attr == "devnull":
+                return True
+        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            val = sub.value.strip()
+            if val in (":memory:", "/dev/null", "nul", "NUL") or "mode=memory" in val:
+                return True
+    return False
+
+
+def _is_hardcoded_path_expr(expr, safe_tmp_vars, hardcoded_path_vars):
+    """Return True if expr represents a hardcoded file/directory/DB path not backed by a temp facility."""
+    if expr is None or _is_safe_temp_expr(expr, safe_tmp_vars):
+        return False
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str) and expr.value.strip():
+        return True
+    if isinstance(expr, ast.Name) and expr.id in hardcoded_path_vars:
+        return True
+    if isinstance(expr, ast.Call):
+        head = _call_head_name(expr)
+        if head in ("Path", "pathlib.Path", "PurePath", "os.path.join", "path.join", " str"):
+            return any(
+                _is_hardcoded_path_expr(a, safe_tmp_vars, hardcoded_path_vars) for a in expr.args
+            )
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Div, ast.Add)):
+        return (
+            _is_hardcoded_path_expr(expr.left, safe_tmp_vars, hardcoded_path_vars)
+            or _is_hardcoded_path_expr(expr.right, safe_tmp_vars, hardcoded_path_vars)
+        )
+    return False
+
+
+def _extract_nonzero_int_const(node, local_int_consts=None):
+    """Return positive integer port constant (> 0), or None if dynamic (0) or non-constant."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+        return node.value if node.value > 0 else None
+    if isinstance(node, ast.Name) and local_int_consts and node.id in local_int_consts:
+        val = local_int_consts[node.id]
+        return val if val > 0 else None
+    return None
+
+
+def _is_path_div(binop_node, local_exprs):
+    """Return True if a `/` BinOp is a pathlib path join rather than numeric division."""
+    for side_node in (binop_node.left, binop_node.right):
+        for sub in ast.walk(side_node):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                return True
+            if isinstance(sub, ast.Name):
+                if sub.id in TMP_FIXTURE_NAMES or sub.id in ("Path", "PurePath", "pathlib"):
+                    return True
+                if local_exprs and sub.id in local_exprs:
+                    assigned = local_exprs[sub.id]
+                    if isinstance(assigned, ast.Call) and _call_head_name(assigned) in ("Path", "pathlib.Path"):
+                        return True
+            if isinstance(sub, ast.Call) and _call_head_name(sub) in ("Path", "pathlib.Path"):
+                return True
+    return False
+
+
+def _expand_expr_nodes(expr, local_exprs):
+    """Yield AST nodes in expr and recursively in local variable value expressions referenced by expr."""
+    stack = [expr]
+    seen_vars = set()
+    while stack:
+        current = stack.pop()
+        if current is None:
+            continue
+        for sub in ast.walk(current):
+            yield sub
+            if (
+                isinstance(sub, ast.Name)
+                and local_exprs
+                and sub.id in local_exprs
+                and sub.id not in seen_vars
+            ):
+                seen_vars.add(sub.id)
+                stack.append(local_exprs[sub.id])
+
+
+def _expr_has_float_safe_guard(expr, local_exprs):
+    """Return True if expr or its local variable inputs use approx, isclose, allclose, round, or Decimal."""
+    for sub in _expand_expr_nodes(expr, local_exprs):
+        if isinstance(sub, ast.Call):
+            if isinstance(sub.func, ast.Name) and sub.func.id in FLOAT_SAFE_FUNCS:
+                return True
+            if isinstance(sub.func, ast.Attribute) and sub.func.attr in FLOAT_SAFE_FUNCS:
+                return True
+        elif isinstance(sub, ast.Name) and sub.id in FLOAT_SAFE_FUNCS:
+            return True
+    return False
+
+
+def _expr_involves_float_calc(expr, local_exprs):
+    """Return True if expr or its local variable inputs involve float literals, true division, sum(), or float math."""
+    for sub in _expand_expr_nodes(expr, local_exprs):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, float):
+            return True
+        if isinstance(sub, ast.BinOp):
+            if isinstance(sub.op, ast.Div) and not _is_path_div(sub, local_exprs):
+                return True
+        if isinstance(sub, ast.Call):
+            if isinstance(sub.func, ast.Name) and sub.func.id in ("sum", "float", "fsum"):
+                return True
+            if (
+                isinstance(sub.func, ast.Attribute)
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id in ("math", "np", "numpy", "statistics")
+                and sub.func.attr in (MATH_FLOAT_FUNCS | {"mean", "fmean", "stdev", "var"})
+            ):
+                return True
+    return False
+
+
+def _scan_function_signals(func_node, file_rel, side, has_tmp_fixture=False, has_net_mock=False):
     """Scan a function/method AST and coalesce static indicators per function.
 
     Synchronized single threads (where a single spawned Thread/Process variable
@@ -333,16 +547,64 @@ def _scan_function_signals(func_node, file_rel, side):
         "hash_order_sensitivity": [],
         "shared_state_interference": [],
         "timezone_sensitivity": [],
+        "resource_leak": [],
+        "external_io": [],
+        "float_precision": [],
         "returns_set": False,
+        "returns_float": False,
     }
     raw_random = []
     raw_race = []
     raw_sleep = []
     raw_join = []
     raw_tz = []
+    raw_res_file = []
+    raw_res_port = []
+    raw_ext_io = []
+    raw_float_asserts = []
 
     fixed_seed = _has_fixed_seed_call(func_node)
     has_time_freeze = _has_time_freeze_or_tz_override(func_node)
+    local_has_tmp = has_tmp_fixture or _has_tmp_fixture_in_nodes([func_node])
+    local_has_net_mock = has_net_mock or _has_network_mock_in_nodes([func_node])
+
+    if isinstance( getattr(func_node, "returns", None), ast.Name) and func_node.returns.id == "float":
+        signals["returns_float"] = True
+
+    # Collect local variable assignments for temp-path, hardcoded-path, port-int, and float tracking
+    safe_tmp_vars = {
+        arg.arg
+        for arg in getattr(getattr(func_node, "args", None), "args", [])
+        if arg.arg in TMP_FIXTURE_NAMES
+    }
+    hardcoded_path_vars = set()
+    local_int_consts = {}
+    local_exprs = {}
+
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if _is_safe_temp_expr(item.context_expr, safe_tmp_vars):
+                    if isinstance(item.optional_vars, ast.Name):
+                        safe_tmp_vars.add(item.optional_vars.id)
+                    elif isinstance(item.optional_vars, ast.Tuple):
+                        for elt in item.optional_vars.elts:
+                            if isinstance(elt, ast.Name):
+                                safe_tmp_vars.add(elt.id)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    local_exprs[target.id] = node.value
+                    if _is_safe_temp_expr(node.value, safe_tmp_vars):
+                        safe_tmp_vars.add(target.id)
+                    elif _is_hardcoded_path_expr(node.value, safe_tmp_vars, hardcoded_path_vars):
+                        hardcoded_path_vars.add(target.id)
+                    if (
+                        isinstance(node.value, ast.Constant)
+                        and isinstance(node.value.value, int)
+                        and not isinstance(node.value.value, bool)
+                    ):
+                        local_int_consts[target.id] = node.value.value
 
     # Check for @lru_cache / @cache decorators on Code Side functions
     for dec in getattr(func_node, "decorator_list", []):
@@ -396,11 +658,27 @@ def _scan_function_signals(func_node, file_rel, side):
                 assigned_worker_calls[id(node.value)] = target_names
 
     for node in ast.walk(func_node):
-        if isinstance(node, ast.Return) and isinstance(node.value, (ast.Set, ast.SetComp)):
-            signals["returns_set"] = True
-        elif isinstance(node, ast.Return) and isinstance(node.value, ast.Call):
-            if isinstance(node.value.func, ast.Name) and node.value.func.id == "set":
+        if isinstance(node, ast.Return) and node.value is not None:
+            if isinstance(node.value, (ast.Set, ast.SetComp)):
                 signals["returns_set"] = True
+            elif isinstance(node.value, ast.Call):
+                if isinstance(node.value.func, ast.Name) and node.value.func.id == "set":
+                    signals["returns_set"] = True
+            if (
+                not _expr_has_float_safe_guard(node.value, local_exprs)
+                and _expr_involves_float_calc(node.value, local_exprs)
+            ):
+                signals["returns_float"] = True
+
+        if side == "Test Side" and isinstance(node, ast.Assert):
+            if not _expr_has_float_safe_guard(node.test, local_exprs):
+                for sub in ast.walk(node.test):
+                    if isinstance(sub, ast.Compare) and any(
+                        isinstance(op, (ast.Eq, ast.NotEq)) for op in sub.ops
+                    ):
+                        if _expr_involves_float_calc(sub, local_exprs):
+                            raw_float_asserts.append(node.lineno)
+                            break
 
         if (
             not has_time_freeze
@@ -531,6 +809,169 @@ def _scan_function_signals(func_node, file_rel, side):
                 if not is_path_join and len(node.args) == 1 and not _is_sorted_arg(node.args[0]):
                     raw_join.append(node.lineno)
 
+            # Test Side unittest self.assertEqual / self.assertNotEqual float precision check
+            if (
+                side == "Test Side"
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("assertEqual", "assertNotEqual")
+                and len(node.args) >= 2
+                and not _expr_has_float_safe_guard(node, local_exprs)
+            ):
+                if any(_expr_involves_float_calc(a, local_exprs) for a in node.args[:2]):
+                    raw_float_asserts.append(node.lineno)
+
+            # Resource leak: hardcoded file/database mutations (when not using tmp_path/tmpdir)
+            if not local_has_tmp:
+                is_builtin_open = (
+                    (isinstance(node.func, ast.Name) and node.func.id == "open")
+                    or (
+                        isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "io"
+                        and node.func.attr == "open"
+                    )
+                )
+                if is_builtin_open:
+                    path_arg = node.args[0] if node.args else None
+                    mode_arg = node.args[1] if len(node.args) >= 2 else None
+                    for kw in node.keywords:
+                        if kw.arg == "file" and path_arg is None:
+                            path_arg = kw.value
+                        elif kw.arg == "mode" and mode_arg is None:
+                            mode_arg = kw.value
+                    if (
+                        isinstance(mode_arg, ast.Constant)
+                        and isinstance(mode_arg.value, str)
+                        and any(m in mode_arg.value for m in ("w", "a", "x", "+"))
+                        and _is_hardcoded_path_expr(path_arg, safe_tmp_vars, hardcoded_path_vars)
+                    ):
+                        raw_res_file.append((node.lineno, "open(...)"))
+                elif isinstance(node.func, ast.Attribute):
+                    attr = node.func.attr
+                    recv = node.func.value
+                    if attr in PATH_MUTATION_METHODS and _is_hardcoded_path_expr(
+                        recv, safe_tmp_vars, hardcoded_path_vars
+                    ):
+                        raw_res_file.append((node.lineno, f"Path.{attr}(...)"))
+                    elif attr == "open" and _is_hardcoded_path_expr(
+                        recv, safe_tmp_vars, hardcoded_path_vars
+                    ):
+                        mode_arg = node.args[0] if node.args else None
+                        for kw in node.keywords:
+                            if kw.arg == "mode" and mode_arg is None:
+                                mode_arg = kw.value
+                        if (
+                            isinstance(mode_arg, ast.Constant)
+                            and isinstance(mode_arg.value, str)
+                            and any(m in mode_arg.value for m in ("w", "a", "x", "+"))
+                        ):
+                            raw_res_file.append((node.lineno, "Path.open(...)"))
+                    elif (
+                        isinstance(recv, ast.Name)
+                        and recv.id == "os"
+                        and attr in OS_FS_MUTATION_FUNCS
+                        and node.args
+                        and _is_hardcoded_path_expr(node.args[0], safe_tmp_vars, hardcoded_path_vars)
+                    ):
+                        raw_res_file.append((node.lineno, f"os.{attr}(...)"))
+                    elif (
+                        isinstance(recv, ast.Name)
+                        and recv.id == "shutil"
+                        and attr in SHUTIL_MUTATION_FUNCS
+                        and node.args
+                        and _is_hardcoded_path_expr(node.args[0], safe_tmp_vars, hardcoded_path_vars)
+                    ):
+                        raw_res_file.append((node.lineno, f"shutil.{attr}(...)"))
+                    elif (
+                        isinstance(recv, ast.Name)
+                        and recv.id == "sqlite3"
+                        and attr == "connect"
+                    ):
+                        db_arg = node.args[0] if node.args else None
+                        for kw in node.keywords:
+                            if kw.arg == "database" and db_arg is None:
+                                db_arg = kw.value
+                        if _is_hardcoded_path_expr(db_arg, safe_tmp_vars, hardcoded_path_vars):
+                            raw_res_file.append((node.lineno, "sqlite3.connect(...)"))
+                elif isinstance(node.func, ast.Name):
+                    fn = node.func.id
+                    if (
+                        fn in (OS_FS_MUTATION_FUNCS | {"rmtree"})
+                        and node.args
+                        and _is_hardcoded_path_expr(node.args[0], safe_tmp_vars, hardcoded_path_vars)
+                    ):
+                        prefix = "shutil" if fn == "rmtree" else "os"
+                        raw_res_file.append((node.lineno, f"{prefix}.{fn}(...)"))
+
+            # Resource leak: hardcoded non-zero network port bindings
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "bind" and node.args:
+                addr = node.args[0]
+                if isinstance(addr, (ast.Tuple, ast.List)) and len(addr.elts) >= 2:
+                    port_val = _extract_nonzero_int_const(addr.elts[1], local_int_consts)
+                    if port_val is not None:
+                        raw_res_port.append((node.lineno, f".bind((..., {port_val}))"))
+            else:
+                fn_name = None
+                if isinstance(node.func, ast.Name):
+                    fn_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    fn_name = node.func.attr
+                if fn_name in PORT_BIND_SERVER_CLASSES and node.args:
+                    addr = node.args[0]
+                    if isinstance(addr, (ast.Tuple, ast.List)) and len(addr.elts) >= 2:
+                        port_val = _extract_nonzero_int_const(addr.elts[1], local_int_consts)
+                        if port_val is not None:
+                            raw_res_port.append((node.lineno, f"{fn_name}((..., {port_val}))"))
+                elif fn_name in PORT_BIND_FUNCS:
+                    port_val = None
+                    for kw in node.keywords:
+                        if kw.arg == "port":
+                            port_val = _extract_nonzero_int_const(kw.value, local_int_consts)
+                    if port_val is None and node.args:
+                        if isinstance(node.args[0], (ast.Tuple, ast.List)) and len(node.args[0].elts) >= 2:
+                            port_val = _extract_nonzero_int_const(node.args[0].elts[1], local_int_consts)
+                        elif fn_name == "make_server" and len(node.args) >= 2:
+                            port_val = _extract_nonzero_int_const(node.args[1], local_int_consts)
+                        elif fn_name == "start_server" and len(node.args) >= 3:
+                            port_val = _extract_nonzero_int_const(node.args[2], local_int_consts)
+                    if port_val is not None:
+                        raw_res_port.append((node.lineno, f"{fn_name}(..., port={port_val})"))
+
+            # External I/O: unmocked network requests
+            if not local_has_net_mock:
+                if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+                    mod_id = node.func.value.id
+                    attr = node.func.attr
+                    if mod_id in ("requests", "httpx") and attr in REQUESTS_HTTPX_METHODS:
+                        raw_ext_io.append((node.lineno, f"{mod_id}.{attr}(...)"))
+                    elif mod_id == "aiohttp" and attr in AIOHTTP_TARGETS:
+                        raw_ext_io.append((node.lineno, f"aiohttp.{attr}(...)"))
+                    elif mod_id == "socket" and attr in SOCKET_NET_FUNCS:
+                        raw_ext_io.append((node.lineno, f"socket.{attr}(...)"))
+                    elif mod_id == "smtplib" and attr in SMTPLIB_TARGETS:
+                        raw_ext_io.append((node.lineno, f"smtplib.{attr}(...)"))
+                    elif mod_id == "request" and attr in URLLIB_REQUEST_FUNCS:
+                        raw_ext_io.append((node.lineno, f"urllib.request.{attr}(...)"))
+                elif (
+                    isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Attribute)
+                    and isinstance(node.func.value.value, ast.Name)
+                    and node.func.value.value.id == "urllib"
+                    and node.func.value.attr == "request"
+                    and node.func.attr in URLLIB_REQUEST_FUNCS
+                ):
+                    raw_ext_io.append((node.lineno, f"urllib.request.{node.func.attr}(...)"))
+                elif isinstance(node.func, ast.Name):
+                    fn = node.func.id
+                    if fn in URLLIB_REQUEST_FUNCS:
+                        raw_ext_io.append((node.lineno, f"urllib.request.{fn}(...)"))
+                    elif fn == "ClientSession":
+                        raw_ext_io.append((node.lineno, "aiohttp.ClientSession(...)"))
+                    elif fn in SOCKET_NET_FUNCS:
+                        raw_ext_io.append((node.lineno, f"socket.{fn}(...)"))
+                    elif fn in SMTPLIB_TARGETS:
+                        raw_ext_io.append((node.lineno, f"smtplib.{fn}(...)"))
+
     if raw_random:
         raw_random.sort(key=lambda item: item[0])
         lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order([ln for ln, _ in raw_random]))
@@ -569,6 +1010,45 @@ def _scan_function_signals(func_node, file_rel, side):
             "side": side,
             "location": f"{file_rel}:{lines_str}",
             "detail": f"calls {calls_str} without explicit timezone (`tz`) or time freeze",
+        })
+
+    if raw_res_file:
+        raw_res_file.sort(key=lambda item: item[0])
+        lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order([ln for ln, _ in raw_res_file]))
+        calls_str = ", ".join(f"`{c}`" for c in _dedup_preserve_order([c for _, c in raw_res_file]))
+        signals["resource_leak"].append({
+            "side": side,
+            "location": f"{file_rel}:{lines_str}",
+            "detail": f"operates on hardcoded file/database path via {calls_str} without `tmp_path` or `tempfile`",
+        })
+
+    if raw_res_port:
+        raw_res_port.sort(key=lambda item: item[0])
+        lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order([ln for ln, _ in raw_res_port]))
+        ports_str = ", ".join(f"`{p}`" for p in _dedup_preserve_order([p for _, p in raw_res_port]))
+        signals["resource_leak"].append({
+            "side": side,
+            "location": f"{file_rel}:{lines_str}",
+            "detail": f"binds hardcoded non-zero network port via {ports_str}",
+        })
+
+    if raw_ext_io:
+        raw_ext_io.sort(key=lambda item: item[0])
+        lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order([ln for ln, _ in raw_ext_io]))
+        calls_str = ", ".join(f"`{c}`" for c in _dedup_preserve_order([c for _, c in raw_ext_io]))
+        signals["external_io"].append({
+            "side": side,
+            "location": f"{file_rel}:{lines_str}",
+            "detail": f"performs unmocked external network I/O via {calls_str}",
+        })
+
+    if raw_float_asserts:
+        raw_float_asserts.sort()
+        lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order(raw_float_asserts))
+        signals["float_precision"].append({
+            "side": "Test Side",
+            "location": f"{file_rel}:{lines_str}",
+            "detail": "asserts strict equality (`==`/`!=`) on floating-point values without `pytest.approx` or `math.isclose`",
         })
 
     return signals
@@ -701,6 +1181,9 @@ def inspect_test_source(test_id, project_dir=None):
             "hash_order_sensitivity": [],
             "shared_state_interference": [],
             "timezone_sensitivity": [],
+            "resource_leak": [],
+            "external_io": [],
+            "float_precision": [],
         },
     }
     if not project_dir:
@@ -736,10 +1219,23 @@ def inspect_test_source(test_id, project_dir=None):
         "hash_order_sensitivity": [],
         "shared_state_interference": [],
         "timezone_sensitivity": [],
+        "resource_leak": [],
+        "external_io": [],
+        "float_precision": [],
     }
 
+    enclosing_cls = _find_enclosing_class(test_tree, node_parts)
+    param_names = [arg.arg for arg in test_func.args.args if arg.arg != "self"]
+    fixture_defs = _find_fixture_defs(param_names, test_tree, test_file, project_path)
+    all_test_func_nodes = [test_func] + [fix_node for _, _, _, fix_node in fixture_defs]
+    has_tmp_fixture = _has_tmp_fixture_in_nodes(all_test_func_nodes)
+    has_net_mock = _has_network_mock_in_nodes(all_test_func_nodes, enclosing_cls=enclosing_cls)
+
     # Scan the test function itself (Test Side)
-    test_signals = _scan_function_signals(test_func, test_rel, "Test Side")
+    test_signals = _scan_function_signals(
+        test_func, test_rel, "Test Side",
+        has_tmp_fixture=has_tmp_fixture, has_net_mock=has_net_mock,
+    )
     for key in indicators:
         indicators[key].extend(test_signals[key])
 
@@ -751,7 +1247,6 @@ def inspect_test_source(test_id, project_dir=None):
             local_vars[g_name] = g_call
 
     # Inspect enclosing test class (setup_method, class-level attributes) if test is a method
-    enclosing_cls = _find_enclosing_class(test_tree, node_parts)
     if enclosing_cls is not None:
         cls_attrs = {}
         for item in getattr(enclosing_cls, "body", []):
@@ -763,6 +1258,12 @@ def inspect_test_source(test_id, project_dir=None):
                         if call_head:
                             self_attrs[t.id] = call_head
             elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in SETUP_METHODS:
+                setup_signals = _scan_function_signals(
+                    item, test_rel, "Test Side",
+                    has_tmp_fixture=has_tmp_fixture, has_net_mock=has_net_mock,
+                )
+                for key in indicators:
+                    indicators[key].extend(setup_signals[key])
                 for sub in ast.walk(item):
                     if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
                         head = _call_head_name(sub.value)
@@ -776,8 +1277,6 @@ def inspect_test_source(test_id, project_dir=None):
                                     self_attrs[t.attr] = head
 
     # Inspect pytest fixtures referenced by test_func parameters
-    param_names = [arg.arg for arg in test_func.args.args if arg.arg != "self"]
-    fixture_defs = _find_fixture_defs(param_names, test_tree, test_file, project_path)
     for fix_name, fix_file, fix_tree, fix_node in fixture_defs:
         fix_rel = _rel_path(fix_file, project_path)
         fix_imported, fix_globals = _collect_imports_and_globals(
@@ -785,7 +1284,10 @@ def inspect_test_source(test_id, project_dir=None):
         )
         for k, v in fix_imported.items():
             imported.setdefault(k, v)
-        fix_signals = _scan_function_signals(fix_node, fix_rel, "Test Side")
+        fix_signals = _scan_function_signals(
+            fix_node, fix_rel, "Test Side",
+            has_tmp_fixture=has_tmp_fixture, has_net_mock=has_net_mock,
+        )
         for key in indicators:
             indicators[key].extend(fix_signals[key])
         indicators["shared_state_interference"].extend(
@@ -855,11 +1357,16 @@ def inspect_test_source(test_id, project_dir=None):
             else ({}, {})
         )
 
-        code_signals = _scan_function_signals(func_node, code_rel, "Code Side")
+        code_signals = _scan_function_signals(
+            func_node, code_rel, "Code Side",
+            has_tmp_fixture=has_tmp_fixture, has_net_mock=has_net_mock,
+        )
         indicators["unseeded_randomness"].extend(code_signals["unseeded_randomness"])
         indicators["race_conditions"].extend(code_signals["race_conditions"])
         indicators["shared_state_interference"].extend(code_signals["shared_state_interference"])
         indicators["timezone_sensitivity"].extend(code_signals["timezone_sensitivity"])
+        indicators["resource_leak"].extend(code_signals["resource_leak"])
+        indicators["external_io"].extend(code_signals["external_io"])
 
         # Code Side shared module-level state (only when func doesn't already have an unsynchronized
         # thread race and the module's state wasn't explicitly reset by the test)
@@ -906,6 +1413,44 @@ def inspect_test_source(test_id, project_dir=None):
                 f"unsorted `join(...)` on unordered `set` from "
                 f"`{code_rel}:{func_node.lineno}` (`{desc}()`)"
             )
+
+        if code_signals["returns_float"] and not indicators["float_precision"]:
+            test_local_exprs = {
+                t.id: n.value
+                for n in ast.walk(test_func)
+                if isinstance(n, ast.Assign)
+                for t in n.targets
+                if isinstance(t, ast.Name)
+            }
+            leaf_sym = desc.split(".")[-1]
+            float_assert_lines = []
+            for n in ast.walk(test_func):
+                if isinstance(n, ast.Assert) and not _expr_has_float_safe_guard(n.test, test_local_exprs):
+                    has_eq = any(
+                        isinstance(sub, ast.Compare)
+                        and any(isinstance(op, (ast.Eq, ast.NotEq)) for op in sub.ops)
+                        for sub in ast.walk(n.test)
+                    )
+                    if has_eq:
+                        for sub in _expand_expr_nodes(n.test, test_local_exprs):
+                            if isinstance(sub, ast.Call):
+                                if (
+                                    (isinstance(sub.func, ast.Name) and sub.func.id == leaf_sym)
+                                    or (isinstance(sub.func, ast.Attribute) and sub.func.attr == leaf_sym)
+                                ):
+                                    float_assert_lines.append(n.lineno)
+                                    break
+            if float_assert_lines:
+                float_assert_lines.sort()
+                lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order(float_assert_lines))
+                indicators["float_precision"].append({
+                    "side": "Test Side",
+                    "location": f"{test_rel}:{lines_str}",
+                    "detail": (
+                        f"asserts strict equality (`==`/`!=`) on floating-point return from "
+                        f"`{code_rel}:{func_node.lineno}` (`{desc}()`) without `pytest.approx` or `math.isclose`"
+                    ),
+                })
 
         # Follow up to 3 hops: self.<helper>(), same-module helper functions, and imported functions
         for sub in ast.walk(func_node):
@@ -1010,6 +1555,9 @@ ALL_CAUSE_CATEGORIES = (
     "hash_order_sensitivity",
     "shared_state_interference",
     "timezone_sensitivity",
+    "resource_leak",
+    "external_io",
+    "float_precision",
 )
 
 
@@ -1059,6 +1607,26 @@ def disambiguate_causes(suspected_causes, source_info):
                             f"`{hit['location']}` {hit['detail']}."
                         )
                         compact_hints.append(f"`{hit['location']}` {hit['detail']}")
+            elif len(matched_cands) == 0:
+                ext_matched = [
+                    c for c in ("external_io", "resource_leak", "float_precision")
+                    if indicators.get(c)
+                ]
+                if ext_matched:
+                    chosen = [ext_matched[0]]
+                    resolved.extend(chosen)
+                    disambiguated = True
+                    for cat in chosen:
+                        for hit in indicators.get(cat, []):
+                            sides.append(hit["side"])
+                            notes.append(
+                                f"Heuristic hint (`{cat}`, {hit['side']}): "
+                                f"`{hit['location']}` {hit['detail']}."
+                            )
+                            compact_hints.append(f"`{hit['location']}` {hit['detail']}")
+                else:
+                    has_ambiguous = True
+                    resolved.extend(candidates)
             else:
                 has_ambiguous = True
                 resolved.extend(candidates)
@@ -1074,18 +1642,48 @@ def disambiguate_causes(suspected_causes, source_info):
             if group.get("status") == "ambiguous":
                 has_ambiguous = True
             for cand in candidates:
-                resolved.append(cand)
                 hits = indicators.get(cand, [])
-                for hit in hits:
-                    sides.append(hit["side"])
-                    notes.append(
-                        f"Heuristic hint (`{cand}`, {hit['side']}): "
-                        f"`{hit['location']}` {hit['detail']}."
-                    )
-                    compact_hints.append(f"`{hit['location']}` {hit['detail']}")
+                if (
+                    cand == "shared_state_interference"
+                    and not hits
+                    and indicators.get("resource_leak")
+                    and not indicators.get("unseeded_randomness")
+                ):
+                    resolved.append("resource_leak")
+                    disambiguated = True
+                    for hit in indicators.get("resource_leak", []):
+                        sides.append(hit["side"])
+                        notes.append(
+                            f"Heuristic hint (`resource_leak`, {hit['side']}): "
+                            f"`{hit['location']}` {hit['detail']}."
+                        )
+                        compact_hints.append(f"`{hit['location']}` {hit['detail']}")
+                elif (
+                    cand == "hash_order_sensitivity"
+                    and not hits
+                    and indicators.get("float_precision")
+                ):
+                    resolved.append("float_precision")
+                    disambiguated = True
+                    for hit in indicators.get("float_precision", []):
+                        sides.append(hit["side"])
+                        notes.append(
+                            f"Heuristic hint (`float_precision`, {hit['side']}): "
+                            f"`{hit['location']}` {hit['detail']}."
+                        )
+                        compact_hints.append(f"`{hit['location']}` {hit['detail']}")
+                else:
+                    resolved.append(cand)
+                    for hit in hits:
+                        sides.append(hit["side"])
+                        notes.append(
+                            f"Heuristic hint (`{cand}`, {hit['side']}): "
+                            f"`{hit['location']}` {hit['detail']}."
+                        )
+                        compact_hints.append(f"`{hit['location']}` {hit['detail']}")
 
     dedup_runtime = _dedup_preserve_order(all_runtime_cands)
-    runtime_cands_set = set(dedup_runtime)
+    runtime_cands_set = set(dedup_runtime) | set(resolved)
     runtime_str = " / ".join(f"`{c}`" for c in dedup_runtime)
 
     for other_cat in ALL_CAUSE_CATEGORIES:
