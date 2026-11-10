@@ -644,6 +644,7 @@ def _translate_hint_zh(hint):
     text = text.replace("calls ", "调用了 ")
     text = text.replace("uses unsynchronized concurrency/timing primitives", "使用了未同步的并发/计时原语")
     text = text.replace("uses timing sleep", "使用了固定时长等待")
+    text = re.sub(r" \(via (`[^`]+`)\)", r"（经由辅助函数 \1 调用）", text)
     text = re.sub(r"（声明于 (`[^`]+`)\)", r"（声明于 \1）", text)
     return text
 
