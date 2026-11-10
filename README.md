@@ -79,7 +79,7 @@ Each diagnostic section further pinpoints the **polluting predecessor test** and
 - **Small-Sample False-Positive Guards**: Protects low-probability probabilistic tests that happen not to flip during the finite `repeat` baseline from being misclassified as deterministic hash-seed or order bugs.
 
 ### Stage 3 — Static Python AST Disambiguation & Triage Report (`src/report/`)
-- **Runtime + AST Disambiguation**: When runtime behaviour is ambiguous (both `unseeded_randomness` and `race_conditions` vary under identical seed and test order), inspects Python Abstract Syntax Trees (AST) to narrow the root cause and assign fault ownership (`Test Side` vs. `Code Side`).
+- **Runtime + AST Disambiguation & Refinement**: When runtime behaviour is ambiguous (both `unseeded_randomness` and `race_conditions` vary under identical seed and test order), inspects Python Abstract Syntax Trees (AST) to narrow the root cause (`AST Hint *`); when runtime evidence points to `hash_order_sensitivity` or `shared_state_interference` and AST identifies strict floating-point equality (`float_precision`) or unisolated file/port resources (`resource_leak`), refines the category (`AST Refined *`) while preserving the original runtime candidates and assigning fault ownership (`Test Side` vs. `Code Side`).
 - **Deep Cross-File Call Graph & Fixture Resolution**:
   - Follows imported functions, methods, and class instantiations up to **3 hops** across project modules (including relative imports).
   - Resolves `@pytest.fixture` definitions across the test file and ancestor `conftest.py` files.
@@ -142,7 +142,7 @@ pytest-flaky-triage --project ./scenario --out ./out --lang zh --report-only
 
 ### Mode 2: Full Repository Clone (Development, Demo & Self-Tests)
 
-If you want the full source tree, the `scenario/` benchmark suite, and the tool's 129-test verification suite in one place:
+If you want the full source tree, the `scenario/` benchmark suite, and the tool's 132-test verification suite in one place:
 
 **macOS / Linux:**
 ```bash
@@ -159,7 +159,7 @@ pytest-flaky-triage --demo
 # 2. Inspect the generated Markdown triage report:
 cat out/report.md
 
-# 3. Run the tool's own 129 unit and integration tests:
+# 3. Run the tool's own 132 unit and integration tests:
 bash scripts/test.sh
 ```
 
@@ -179,7 +179,7 @@ pytest-flaky-triage --demo
 # 2. Inspect the generated Markdown triage report:
 Get-Content -Encoding utf8 out\report.md
 
-# 3. Run the tool's own 129 unit and integration tests:
+# 3. Run the tool's own 132 unit and integration tests:
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 
@@ -256,7 +256,7 @@ scripts/
   lib/flaky_plugin.py    pytest sideband hook plugin, O(N) reorder, and process-group timeout controller
   lib/parse_log.awk      hardened AWK log-parser fallback
   demo.sh                runs the demonstration scenario end to end
-  test.sh                runs the tool's own 129-test verification suite
+  test.sh                runs the tool's own 132-test verification suite
 src/
   analysis/              Stage 2 stability scoring, root-cause inference, and polluter identification (`python -m analysis`)
   report/                Stage 3 AST source heuristics and Markdown triage report generator (`python -m report`)
@@ -270,6 +270,7 @@ tests/
   fixtures/              parser and analysis test fixtures
 scenario/                optional 22-test controlled flaky-test benchmark suite (excluded from wheel/pip installs)
 docs/
+  contracts.md           Stage 1 / Stage 2 / Stage 3 data contracts and 8-category taxonomy
   scenario.md            benchmark answer key: every planted case and expected classification
 pyproject.toml           PEP 621 package and CLI entry point configuration
 requirements.txt         runtime dependencies

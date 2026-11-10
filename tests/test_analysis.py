@@ -343,3 +343,110 @@ def test_analysis_identifies_suspected_polluters(tmp_path):
     assert victim["suspected_causes"][0]["candidates"] == ["shared_state_interference"]
     assert victim["suspected_causes"][0]["suspected_polluters"] == ["test_polluter"]
 
+
+def test_analysis_order_polluter_single_pass_with_dirty_isolated_is_shared_state(tmp_path):
+    """Task 1 regression: 10 usable runs where test_polluter leaves persistent disk state
+    so test_victim fails 9 times (including repeat, hashseed, and isolated) and only passes
+    once in order=reverse when test_victim runs before test_polluter."""
+    results = []
+    metadata = []
+    # Runs 1-5: repeat (test_polluter at pos 1, test_victim at pos 2 -> fails)
+    # Runs 6-7: hashseed (test_polluter at pos 1, test_victim at pos 2 -> fails)
+    # Run 8: order=shuffle:1 (test_polluter at pos 1, test_victim at pos 2 -> fails)
+    # Run 9: order=reverse (test_victim at pos 1 -> passes, test_polluter at pos 2)
+    # Run 10: isolated=alone (test_victim fails because disk file remained dirty)
+    plan = [
+        (1, "repeat", "1", False),
+        (2, "repeat", "2", False),
+        (3, "repeat", "3", False),
+        (4, "repeat", "4", False),
+        (5, "repeat", "5", False),
+        (6, "hashseed", "1", False),
+        (7, "hashseed", "2", False),
+        (8, "order", "shuffle:1", False),
+        (9, "order", "reverse", True),
+    ]
+    for run_id, cond, val, reversed_order in plan:
+        seed = int(val) if cond == "hashseed" else 0
+        if reversed_order:
+            results.append([run_id, cond, val, 1, "test_victim", "passed"])
+            results.append([run_id, cond, val, 2, "test_polluter", "passed"])
+            metadata.append([run_id, cond, val, seed, 0, "ok", "0.02", 2, 2, f"logs/run_{run_id:03d}.log"])
+        else:
+            results.append([run_id, cond, val, 1, "test_polluter", "passed"])
+            results.append([run_id, cond, val, 2, "test_victim", "failed"])
+            metadata.append([run_id, cond, val, seed, 1, "ok", "0.02", 2, 2, f"logs/run_{run_id:03d}.log"])
+    results.append([10, "isolated", "alone", 1, "test_victim", "failed"])
+    metadata.append([10, "isolated", "alone", 0, 1, "ok", "0.02", 1, 1, "logs/run_010.log"])
+
+    for name, fields, data in [("results.csv", RESULT_FIELDS, results), ("run_meta.csv", META_FIELDS, metadata)]:
+        with (tmp_path / name).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(fields)
+            writer.writerows(data)
+
+    report = read_analysis(tmp_path / "results.csv")
+    victim = {t["test_id"]: t for t in report["tests"]}["test_victim"]
+    assert victim["suspected_causes"] == [
+        {
+            "candidates": ["shared_state_interference"],
+            "status": "suspected",
+            "reason": (
+                "Outcomes differ across test orders, or isolated executions pass while suite executions fail, "
+                "with a consistent repeat baseline. Suspected polluting predecessor(s): test_polluter."
+            ),
+            "run_ids": [1, 2, 3, 4, 5, 8, 9, 10],
+            "suspected_polluters": ["test_polluter"],
+        }
+    ]
+
+
+def test_analysis_mixed_repeat_does_not_swallow_strong_isolation_or_order_polluter(tmp_path):
+    """Task 2 regression: when repeat is mixed (e.g., self-pollution on repeat=2 or composite
+    randomness + state pollution), strong isolation_effect or order_effect with polluters is
+    preserved alongside ['unseeded_randomness', 'race_conditions']."""
+    # Case A: self-pollution or suite victim that passes repeat=1, fails repeat=2, fails order, passes isolated
+    path = write_matrix(
+        tmp_path,
+        [
+            ("repeat", "1", "passed"),
+            ("repeat", "2", "failed"),
+            ("order", "reverse", "failed"),
+            ("isolated", "alone", "passed"),
+        ],
+    )
+    causes = read_analysis(path)["tests"][0]["suspected_causes"]
+    cand_lists = [c["candidates"] for c in causes]
+    assert ["unseeded_randomness", "race_conditions"] in cand_lists
+    assert ["shared_state_interference"] in cand_lists
+
+    # Case B: mixed repeat + deterministic order polluter
+    sub = tmp_path / "polluter_mixed"
+    sub.mkdir()
+    results = [
+        [1, "repeat", "1", 1, "test_victim", "passed"],
+        [1, "repeat", "1", 2, "test_polluter", "passed"],
+        [2, "repeat", "2", 1, "test_polluter", "passed"],
+        [2, "repeat", "2", 2, "test_victim", "failed"],
+        [3, "order", "shuffle:1", 1, "test_polluter", "passed"],
+        [3, "order", "shuffle:1", 2, "test_victim", "failed"],
+        [4, "order", "reverse", 1, "test_victim", "passed"],
+        [4, "order", "reverse", 2, "test_polluter", "passed"],
+    ]
+    metadata = [
+        [1, "repeat", "1", 0, 0, "ok", "0.02", 2, 2, "logs/run_001.log"],
+        [2, "repeat", "2", 0, 1, "ok", "0.02", 2, 2, "logs/run_002.log"],
+        [3, "order", "shuffle:1", 0, 1, "ok", "0.02", 2, 2, "logs/run_003.log"],
+        [4, "order", "reverse", 0, 0, "ok", "0.02", 2, 2, "logs/run_004.log"],
+    ]
+    for name, fields, data in [("results.csv", RESULT_FIELDS, results), ("run_meta.csv", META_FIELDS, metadata)]:
+        with (sub / name).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(fields)
+            writer.writerows(data)
+    victim = {t["test_id"]: t for t in read_analysis(sub / "results.csv")["tests"]}["test_victim"]
+    shared = [c for c in victim["suspected_causes"] if c["candidates"] == ["shared_state_interference"]]
+    assert len(shared) == 1
+    assert shared[0]["suspected_polluters"] == ["test_polluter"]
+
+

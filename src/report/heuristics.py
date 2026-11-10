@@ -1560,6 +1560,19 @@ ALL_CAUSE_CATEGORIES = (
     "float_precision",
 )
 
+_AST_CATEGORY_REASONS = {
+    "resource_leak": "Outcomes vary across runs or test orders due to unisolated file or port resources.",
+    "external_io": "Outcomes vary under repeated runs due to unmocked external network I/O.",
+    "float_precision": "Outcomes vary across hash seeds or repeated runs due to strict floating-point equality assertions.",
+}
+
+
+def _with_polluter_suffix(new_base_reason, original_reason):
+    if " Suspected polluting predecessor(s): " in (original_reason or ""):
+        _, p_part = original_reason.split(" Suspected polluting predecessor(s): ", 1)
+        return f"{new_base_reason} Suspected polluting predecessor(s): {p_part}"
+    return new_base_reason
+
 
 def disambiguate_causes(suspected_causes, source_info):
     """Combine runtime suspected_causes with AST heuristic hints.
@@ -1573,12 +1586,15 @@ def disambiguate_causes(suspected_causes, source_info):
     if not suspected_causes:
         return {
             "resolved_candidates": [],
+            "runtime_candidates": [],
             "fault_side": "N/A",
             "heuristic_notes": [],
             "compact_hints": [],
             "conflicting_hints": [],
             "basis": "—",
+            "resolution": "none",
             "disambiguated": False,
+            "refined": False,
         }
 
     indicators = (source_info or {}).get("indicators", {})
@@ -1588,17 +1604,32 @@ def disambiguate_causes(suspected_causes, source_info):
     compact_hints = []
     conflicting_hints = []
     disambiguated = False
+    refined = False
     has_ambiguous = False
     all_runtime_cands = []
 
     for group in suspected_causes:
-        candidates = list(group.get("candidates", []))
+        candidates = list(group.get("runtime_candidates") or group.get("candidates", []))
+        orig_status = group.get("runtime_status") or group.get(
+            "status", "ambiguous" if len(candidates) > 1 else "suspected"
+        )
+        orig_reason = group.get("runtime_reason") or group.get("reason", "")
         all_runtime_cands.extend(candidates)
+
         if len(candidates) > 1:
             matched_cands = [c for c in candidates if indicators.get(c)]
             if 0 < len(matched_cands) < len(candidates):
                 resolved.extend(matched_cands)
                 disambiguated = True
+                group["runtime_candidates"] = list(candidates)
+                group["runtime_status"] = orig_status
+                group.setdefault("runtime_reason", orig_reason)
+                group["candidates"] = list(matched_cands)
+                group["status"] = "ambiguous" if len(matched_cands) > 1 else "suspected"
+                group["resolution"] = "disambiguated"
+                group["disambiguated"] = True
+                group["refined"] = False
+                group["reason"] = orig_reason
                 for cat in matched_cands:
                     for hit in indicators.get(cat, []):
                         sides.append(hit["side"])
@@ -1616,6 +1647,17 @@ def disambiguate_causes(suspected_causes, source_info):
                     chosen = [ext_matched[0]]
                     resolved.extend(chosen)
                     disambiguated = True
+                    group["runtime_candidates"] = list(candidates)
+                    group["runtime_status"] = orig_status
+                    group.setdefault("runtime_reason", orig_reason)
+                    group["candidates"] = list(chosen)
+                    group["status"] = "suspected"
+                    group["resolution"] = "disambiguated"
+                    group["disambiguated"] = True
+                    group["refined"] = False
+                    group["reason"] = _with_polluter_suffix(
+                        _AST_CATEGORY_REASONS[chosen[0]], orig_reason
+                    )
                     for cat in chosen:
                         for hit in indicators.get(cat, []):
                             sides.append(hit["side"])
@@ -1627,9 +1669,21 @@ def disambiguate_causes(suspected_causes, source_info):
                 else:
                     has_ambiguous = True
                     resolved.extend(candidates)
+                    group["candidates"] = list(candidates)
+                    group["status"] = orig_status
+                    group["reason"] = orig_reason
+                    group.pop("resolution", None)
+                    group.pop("disambiguated", None)
+                    group.pop("refined", None)
             else:
                 has_ambiguous = True
                 resolved.extend(candidates)
+                group["candidates"] = list(candidates)
+                group["status"] = orig_status
+                group["reason"] = orig_reason
+                group.pop("resolution", None)
+                group.pop("disambiguated", None)
+                group.pop("refined", None)
                 for cat in candidates:
                     for hit in indicators.get(cat, []):
                         sides.append(hit["side"])
@@ -1639,7 +1693,7 @@ def disambiguate_causes(suspected_causes, source_info):
                         )
                         compact_hints.append(f"`{hit['location']}` {hit['detail']}")
         else:
-            if group.get("status") == "ambiguous":
+            if orig_status == "ambiguous":
                 has_ambiguous = True
             for cand in candidates:
                 hits = indicators.get(cand, [])
@@ -1650,7 +1704,18 @@ def disambiguate_causes(suspected_causes, source_info):
                     and not indicators.get("unseeded_randomness")
                 ):
                     resolved.append("resource_leak")
-                    disambiguated = True
+                    refined = True
+                    group["runtime_candidates"] = list(candidates)
+                    group["runtime_status"] = orig_status
+                    group.setdefault("runtime_reason", orig_reason)
+                    group["candidates"] = ["resource_leak"]
+                    group["status"] = "suspected"
+                    group["resolution"] = "refined"
+                    group["refined"] = True
+                    group["disambiguated"] = False
+                    group["reason"] = _with_polluter_suffix(
+                        _AST_CATEGORY_REASONS["resource_leak"], orig_reason
+                    )
                     for hit in indicators.get("resource_leak", []):
                         sides.append(hit["side"])
                         notes.append(
@@ -1664,7 +1729,18 @@ def disambiguate_causes(suspected_causes, source_info):
                     and indicators.get("float_precision")
                 ):
                     resolved.append("float_precision")
-                    disambiguated = True
+                    refined = True
+                    group["runtime_candidates"] = list(candidates)
+                    group["runtime_status"] = orig_status
+                    group.setdefault("runtime_reason", orig_reason)
+                    group["candidates"] = ["float_precision"]
+                    group["status"] = "suspected"
+                    group["resolution"] = "refined"
+                    group["refined"] = True
+                    group["disambiguated"] = False
+                    group["reason"] = _with_polluter_suffix(
+                        _AST_CATEGORY_REASONS["float_precision"], orig_reason
+                    )
                     for hit in indicators.get("float_precision", []):
                         sides.append(hit["side"])
                         notes.append(
@@ -1674,6 +1750,12 @@ def disambiguate_causes(suspected_causes, source_info):
                         compact_hints.append(f"`{hit['location']}` {hit['detail']}")
                 else:
                     resolved.append(cand)
+                    group["candidates"] = list(candidates)
+                    group["status"] = orig_status
+                    group["reason"] = orig_reason
+                    group.pop("resolution", None)
+                    group.pop("disambiguated", None)
+                    group.pop("refined", None)
                     for hit in hits:
                         sides.append(hit["side"])
                         notes.append(
@@ -1702,21 +1784,32 @@ def disambiguate_causes(suspected_causes, source_info):
 
     if disambiguated:
         basis = "AST Hint *"
+        overall_resolution = "disambiguated"
+    elif refined:
+        basis = "AST Refined *"
+        overall_resolution = "refined"
     elif has_ambiguous:
         basis = "Ambiguous"
+        overall_resolution = "ambiguous"
     elif compact_hints:
         basis = "Runtime+AST"
+        overall_resolution = "unchanged"
     elif conflicting_hints:
         basis = "Runtime (AST conflict)"
+        overall_resolution = "unchanged"
     else:
         basis = "Runtime"
+        overall_resolution = "unchanged"
 
     return {
         "resolved_candidates": _dedup_preserve_order(resolved),
+        "runtime_candidates": dedup_runtime,
         "fault_side": fault_side,
         "heuristic_notes": notes,
         "compact_hints": compact_hints,
         "conflicting_hints": conflicting_hints,
         "basis": basis,
+        "resolution": overall_resolution,
         "disambiguated": disambiguated,
+        "refined": refined,
     }

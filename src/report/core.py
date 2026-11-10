@@ -542,6 +542,7 @@ _ZH_SIDE_LABELS = {
 _ZH_BASIS_LABELS = {
     "Runtime+AST": "运行时+AST",
     "AST Hint *": "AST 消歧 *",
+    "AST Refined *": "AST 细化 *",
     "Runtime Only": "仅运行时",
     "Runtime": "仅运行时",
     "Ambiguous": "存在歧义",
@@ -738,13 +739,16 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
     ]
     s2_rows = []
     any_disambiguated = False
+    any_refined = False
     short_counts = Counter(_short_test_name(it["test"]["test_id"]) for it in enriched)
 
     for item in enriched:
         test = item["test"]
         res = item["resolution"]
-        if res["disambiguated"]:
+        if res.get("disambiguated"):
             any_disambiguated = True
+        if res.get("refined"):
+            any_refined = True
         raw_short = _short_test_name(test["test_id"])
         short_name = test["test_id"] if short_counts[raw_short] > 1 else raw_short
         verdict = f"`{test['overall']['verdict']}`"
@@ -801,6 +805,17 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
             lines.extend([
                 "",
                 "*\\* `AST Hint *`: Runtime evidence was `ambiguous` between `unseeded_randomness` and `race_conditions` (outcomes varied under identical seed and test order); narrowed via static AST heuristic inspection.*",
+            ])
+    if any_refined:
+        if is_zh:
+            lines.extend([
+                "",
+                "*\\* `AST 细化 *`：运行时证据已锁定 `hash_order_sensitivity`（哈希顺序敏感）或 `shared_state_interference`（共享状态污染），结合静态 AST 源码特征进一步细化为 `float_precision`（浮点数精度断言隐患）或 `resource_leak`（文件与端口资源冲突）。*",
+            ])
+        else:
+            lines.extend([
+                "",
+                "*\\* `AST Refined *`: Runtime evidence identified `hash_order_sensitivity` or `shared_state_interference` and was further refined into `float_precision` or `resource_leak` via static AST source patterns.*",
             ])
 
     lines.extend([
@@ -861,18 +876,28 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
             lines.append(f"### 3.{idx} {title_label}{side_heading} ({count_label})")
             lines.append("")
 
-            # Collect all distinct runtime (status, candidates, reason) tuples across tests in this group
+            # Collect all distinct runtime (status, candidates, reason, resolution_mode) tuples across tests in this group
             distinct_reasons = []
             per_test_reason_needed = False
             reason_signatures_by_test = []
             for it in group_items:
                 t_sigs = []
                 for cause in it["test"]["suspected_causes"]:
+                    c_mode = cause.get("resolution") or (
+                        "refined"
+                        if it["resolution"].get("refined")
+                        else "disambiguated"
+                        if it["resolution"].get("disambiguated")
+                        else "unchanged"
+                    )
+                    rt_cands = tuple(cause.get("runtime_candidates") or cause["candidates"])
+                    cur_cands = tuple(cause["candidates"])
                     sig = (
                         cause["status"],
-                        tuple(cause["candidates"]),
+                        rt_cands,
+                        cur_cands,
                         cause["reason"],
-                        it["resolution"]["disambiguated"],
+                        c_mode,
                     )
                     t_sigs.append(sig)
                     if sig not in distinct_reasons:
@@ -884,34 +909,59 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
             if len(distinct_reasons) > 1:
                 per_test_reason_needed = True
 
-            suspicion_prefix = "运行时怀疑根因" if is_zh else "Runtime Suspicion"
-            disamb_tag = (
-                "`ambiguous` -> 已由 AST 启发式提示消歧"
-                if is_zh
-                else "`ambiguous` -> narrowed by AST heuristic hint"
-            )
-            if distinct_reasons and not per_test_reason_needed:
-                status, raw_cands, reason, is_disamb = distinct_reasons[0]
-                raw_cands_fmt = " / ".join(f"`{c}`" for c in raw_cands)
-                status_label = disamb_tag if is_disamb else f"`{status}`"
+            def _fmt_cause_header(status, rt_cands, cur_cands, reason, c_mode, test_id=None):
+                cur_cands_fmt = " / ".join(f"`{c}`" for c in cur_cands)
+                rt_plain = " / ".join(rt_cands)
+                if c_mode == "refined":
+                    prefix = "运行时怀疑根因" if is_zh else "Runtime suspected cause"
+                    status_label = (
+                        f"{rt_plain} -> 已由 AST 启发式细化"
+                        if is_zh
+                        else f"{rt_plain} -> refined by AST hint"
+                    )
+                elif c_mode == "disambiguated":
+                    prefix = "运行时怀疑根因" if is_zh else "Runtime Suspicion"
+                    status_label = (
+                        "`ambiguous` -> 已由 AST 启发式提示消歧"
+                        if is_zh
+                        else "`ambiguous` -> narrowed by AST heuristic hint"
+                    )
+                else:
+                    prefix = "运行时怀疑根因" if is_zh else "Runtime Suspicion"
+                    status_label = f"`{status}`"
                 reason_txt = _translate_reason_zh(reason) if is_zh else reason
-                lines.append(
-                    f"> - **{suspicion_prefix} ({status_label}):** {raw_cands_fmt} — {reason_txt}"
-                )
+                if test_id is not None:
+                    return (
+                        f"> - **{prefix} ({_fmt_inline_code(test_id)}, {status_label}):** "
+                        f"{cur_cands_fmt} — {reason_txt}"
+                    )
+                return f"> - **{prefix} ({status_label}):** {cur_cands_fmt} — {reason_txt}"
+
+            if distinct_reasons and not per_test_reason_needed:
+                status, rt_cands, cur_cands, reason, c_mode = distinct_reasons[0]
+                lines.append(_fmt_cause_header(status, rt_cands, cur_cands, reason, c_mode))
             elif distinct_reasons:
                 for it in group_items:
                     t = it["test"]
                     for cause in t["suspected_causes"]:
-                        raw_cands_fmt = " / ".join(f"`{c}`" for c in cause["candidates"])
-                        status_label = (
-                            disamb_tag
-                            if it["resolution"]["disambiguated"]
-                            else f"`{cause['status']}`"
+                        c_mode = cause.get("resolution") or (
+                            "refined"
+                            if it["resolution"].get("refined")
+                            else "disambiguated"
+                            if it["resolution"].get("disambiguated")
+                            else "unchanged"
                         )
-                        reason_txt = _translate_reason_zh(cause["reason"]) if is_zh else cause["reason"]
+                        rt_cands = tuple(cause.get("runtime_candidates") or cause["candidates"])
+                        cur_cands = tuple(cause["candidates"])
                         lines.append(
-                            f"> - **{suspicion_prefix} ({_fmt_inline_code(t['test_id'])}, {status_label}):** "
-                            f"{raw_cands_fmt} — {reason_txt}"
+                            _fmt_cause_header(
+                                cause["status"],
+                                rt_cands,
+                                cur_cands,
+                                cause["reason"],
+                                c_mode,
+                                test_id=t["test_id"],
+                            )
                         )
             else:
                 lines.append(
