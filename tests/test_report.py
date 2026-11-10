@@ -1342,7 +1342,19 @@ def test_resource_leak_ast_heuristics_disambiguation_and_suppression(tmp_path):
     )
     res_test_file = disambiguate_causes(shared_cause, info_test_file)
     assert res_test_file["resolved_candidates"] == ["resource_leak"]
-    assert res_test_file["disambiguated"] is True
+    assert res_test_file["runtime_candidates"] == ["shared_state_interference"]
+    assert res_test_file["resolution"] == "refined"
+    assert res_test_file["refined"] is True
+    assert res_test_file["disambiguated"] is False
+    assert res_test_file["basis"] == "AST Refined *"
+    assert shared_cause[0]["candidates"] == ["resource_leak"]
+    assert shared_cause[0]["runtime_candidates"] == ["shared_state_interference"]
+    assert shared_cause[0]["runtime_status"] == "suspected"
+    assert shared_cause[0]["resolution"] == "refined"
+    assert (
+        shared_cause[0]["reason"]
+        == "Outcomes vary across runs or test orders due to unisolated file or port resources."
+    )
     assert res_test_file["fault_side"] == "Test Side"
     assert res_test_file["conflicting_hints"] == []
 
@@ -1351,7 +1363,10 @@ def test_resource_leak_ast_heuristics_disambiguation_and_suppression(tmp_path):
     )
     res_code_file = disambiguate_causes(shared_cause, info_code_file)
     assert res_code_file["resolved_candidates"] == ["resource_leak"]
-    assert res_code_file["disambiguated"] is True
+    assert res_code_file["runtime_candidates"] == ["shared_state_interference"]
+    assert res_code_file["resolution"] == "refined"
+    assert res_code_file["refined"] is True
+    assert res_code_file["disambiguated"] is False
     assert res_code_file["fault_side"] == "Code Side"
 
     info_code_port = inspect_test_source(
@@ -1359,7 +1374,17 @@ def test_resource_leak_ast_heuristics_disambiguation_and_suppression(tmp_path):
     )
     res_code_port = disambiguate_causes(ambiguous_cause, info_code_port)
     assert res_code_port["resolved_candidates"] == ["resource_leak"]
+    assert res_code_port["runtime_candidates"] == ["unseeded_randomness", "race_conditions"]
+    assert res_code_port["resolution"] == "disambiguated"
     assert res_code_port["disambiguated"] is True
+    assert res_code_port["refined"] is False
+    assert ambiguous_cause[0]["candidates"] == ["resource_leak"]
+    assert ambiguous_cause[0]["runtime_candidates"] == ["unseeded_randomness", "race_conditions"]
+    assert ambiguous_cause[0]["runtime_status"] == "ambiguous"
+    assert (
+        ambiguous_cause[0]["reason"]
+        == "Outcomes vary across runs or test orders due to unisolated file or port resources."
+    )
     assert res_code_port["fault_side"] == "Code Side"
 
     info_tmp_clean = inspect_test_source(
@@ -1519,7 +1544,18 @@ def test_float_precision_ast_heuristics_disambiguation_and_approx_suppression(tm
     )
     res_direct = disambiguate_causes(hash_cause, info_direct)
     assert res_direct["resolved_candidates"] == ["float_precision"]
-    assert res_direct["disambiguated"] is True
+    assert res_direct["runtime_candidates"] == ["hash_order_sensitivity"]
+    assert res_direct["resolution"] == "refined"
+    assert res_direct["refined"] is True
+    assert res_direct["disambiguated"] is False
+    assert res_direct["basis"] == "AST Refined *"
+    assert hash_cause[0]["candidates"] == ["float_precision"]
+    assert hash_cause[0]["runtime_candidates"] == ["hash_order_sensitivity"]
+    assert hash_cause[0]["runtime_status"] == "suspected"
+    assert (
+        hash_cause[0]["reason"]
+        == "Outcomes vary across hash seeds or repeated runs due to strict floating-point equality assertions."
+    )
     assert res_direct["fault_side"] == "Test Side"
     assert res_direct["conflicting_hints"] == []
 
@@ -1528,7 +1564,10 @@ def test_float_precision_ast_heuristics_disambiguation_and_approx_suppression(tm
     )
     res_cross = disambiguate_causes(hash_cause, info_cross)
     assert res_cross["resolved_candidates"] == ["float_precision"]
-    assert res_cross["disambiguated"] is True
+    assert res_cross["runtime_candidates"] == ["hash_order_sensitivity"]
+    assert res_cross["resolution"] == "refined"
+    assert res_cross["refined"] is True
+    assert res_cross["disambiguated"] is False
     assert res_cross["fault_side"] == "Test Side"
 
     for clean_name in (
@@ -1544,7 +1583,93 @@ def test_float_precision_ast_heuristics_disambiguation_and_approx_suppression(tm
     md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
     assert "浮点数精度断言隐患" in md_zh
     assert "对浮点数计算结果使用了严格相等断言" in md_zh
+    assert "因对浮点数计算使用了严格相等断言，导致切换哈希种子或重复运行下发生精度翻转。" in md_zh
+    assert "运行时怀疑根因 (hash_order_sensitivity -> 已由 AST 启发式细化):" in md_zh
+    assert "ambiguous" not in md_zh
+    assert "相同种子和相同顺序下结果仍发生波动" not in md_zh
     assert "asserts strict equality" not in md_zh
+
+    md_en = render_markdown(diag, project_dir=tmp_path, lang="en")
+    assert (
+        "> - **Runtime suspected cause (hash_order_sensitivity -> refined by AST hint):** "
+        "`float_precision` — Outcomes vary across hash seeds or repeated runs due to strict floating-point equality assertions."
+    ) in md_en
+    assert "ambiguous" not in md_en
+
+
+def test_stage2_stage3_contract_refinement_and_external_io_reasons(tmp_path):
+    """Task 3 regression: verify Stage 2 -> Stage 3 contract preservation, reason updates,
+    and Section 2 / Section 3 rendering for resource_leak (refined with polluter suffix)
+    and external_io (disambiguated)."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_contract.py").write_text(
+        "import urllib.request\n\n"
+        "def test_leak_with_polluter():\n"
+        "    with open('shared_cache.txt', 'a') as f:\n"
+        "        f.write('x')\n\n"
+        "def test_net_io():\n"
+        "    urllib.request.urlopen('https://example.com/status', timeout=1)\n",
+        encoding="utf-8",
+    )
+
+    diag_leak = _sample_diagnosis()
+    diag_leak["tests"][1]["test_id"] = "tests/test_contract.py::test_leak_with_polluter"
+    diag_leak["tests"][1]["suspected_causes"] = [
+        {
+            "candidates": ["shared_state_interference"],
+            "status": "suspected",
+            "reason": (
+                "Outcomes differ across test orders, or isolated executions pass while suite executions fail, "
+                "with a consistent repeat baseline. Suspected polluting predecessor(s): test_setup_cache."
+            ),
+            "run_ids": [1, 2],
+            "suspected_polluters": ["tests/test_contract.py::test_setup_cache"],
+        }
+    ]
+
+    md_leak_en = render_markdown(diag_leak, project_dir=tmp_path, lang="en")
+    assert (
+        "> - **Runtime suspected cause (shared_state_interference -> refined by AST hint):** "
+        "`resource_leak` — Outcomes vary across runs or test orders due to unisolated file or port resources. "
+        "Suspected polluting predecessor(s): test_setup_cache."
+    ) in md_leak_en
+    assert "AST Refined *" in md_leak_en
+    assert "ambiguous" not in md_leak_en
+
+    md_leak_zh = render_markdown(diag_leak, project_dir=tmp_path, lang="zh")
+    assert (
+        "> - **运行时怀疑根因 (shared_state_interference -> 已由 AST 启发式细化):** "
+        "`resource_leak` — 因未隔离的文件路径或固定网络端口资源冲突，导致跨轮次或不同执行顺序下结果发生波动。"
+        " 疑似前置污染源测试：test_setup_cache。"
+    ) in md_leak_zh
+    assert "AST 细化 *" in md_leak_zh
+    assert "ambiguous" not in md_leak_zh
+
+    diag_io = _sample_diagnosis()
+    diag_io["tests"][1]["test_id"] = "tests/test_contract.py::test_net_io"
+    diag_io["tests"][1]["suspected_causes"] = [
+        {
+            "candidates": ["unseeded_randomness", "race_conditions"],
+            "status": "ambiguous",
+            "reason": (
+                "Outcomes vary under the same recorded seed and collected order; "
+                "source investigation is needed to distinguish these candidates."
+            ),
+            "run_ids": [1, 2],
+        }
+    ]
+    md_io_en = render_markdown(diag_io, project_dir=tmp_path, lang="en")
+    assert (
+        "> - **Runtime Suspicion (`ambiguous` -> narrowed by AST heuristic hint):** "
+        "`external_io` — Outcomes vary under repeated runs due to unmocked external network I/O."
+    ) in md_io_en
+    md_io_zh = render_markdown(diag_io, project_dir=tmp_path, lang="zh")
+    assert (
+        "> - **运行时怀疑根因 (`ambiguous` -> 已由 AST 启发式提示消歧):** "
+        "`external_io` — 因存在未 Mock 拦截的外部网络请求，导致重复运行下结果发生波动或超时。"
+    ) in md_io_zh
+
 
 
 

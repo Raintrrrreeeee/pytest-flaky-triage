@@ -79,7 +79,7 @@
 - **小样本防误判保护**：针对低概率随机缺陷在有限次 `repeat` 基线中碰巧全部通过的情况，引入跨扰动翻转保护，避免将其误判为确定性的哈希或顺序缺陷。
 
 ### 第三阶段：Python AST 静态源码消歧与诊断报告（`src/report/`）
-- **运行时证据 + AST 静态消歧**：当运行时表现存在歧义（例如“未固定种子的随机数”和“多线程竞态条件”都会在相同种子和相同顺序下忽过忽挂）时，自动扫描测试与业务源码的抽象语法树（AST），完成根因消歧并判定责任归属（`Test Side` 测试侧 vs. `Code Side` 业务代码侧）。
+- **运行时证据 + AST 静态消歧与细化**：当运行时表现存在歧义（例如“未固定种子的随机数”和“多线程竞态条件”都会在相同种子和相同顺序下忽过忽挂）时，自动扫描测试与业务源码的抽象语法树（AST）完成根因消歧（`AST 消歧 *`）；当运行时已锁定 `hash_order_sensitivity` 或 `shared_state_interference` 且 AST 命中浮点数严格相等断言（`float_precision`）或未隔离文件/端口资源（`resource_leak`）时，自动细化根因类别（`AST 细化 *`）并保留原始运行时候选，同时判定责任归属（`Test Side` 测试侧 vs. `Code Side` 业务代码侧）。
 - **深度跨文件调用链与夹具追踪**：
   - 支持跨模块追踪导入的函数、方法与类实例化调用链（深度可达 **3 层调用**，含相对导入）。
   - 自动解析当前测试文件及各级父目录 `conftest.py` 中的 `@pytest.fixture` 夹具函数。
@@ -140,9 +140,9 @@ cat ./out/report.md
 
 ---
 
-### 方式二：克隆完整仓库（包含源码、演示靶场与 129 项自测套件）
+### 方式二：克隆完整仓库（包含源码、演示靶场与 132 项自测套件）
 
-如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 129 个自动化测试用例：
+如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 132 个自动化测试用例：
 
 **macOS / Linux：**
 ```bash
@@ -159,7 +159,7 @@ pytest-flaky-triage --demo --lang zh
 # 2. 查看生成的 Markdown 诊断报告：
 cat out/report.md
 
-# 3. 运行工具自身的 129 个单元与集成测试：
+# 3. 运行工具自身的 132 个单元与集成测试：
 bash scripts/test.sh
 ```
 
@@ -179,7 +179,7 @@ pytest-flaky-triage --demo --lang zh
 # 2. 查看生成的 Markdown 诊断报告：
 Get-Content -Encoding utf8 out\report.md
 
-# 3. 运行工具自身的 129 个单元与集成测试：
+# 3. 运行工具自身的 132 个单元与集成测试：
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 

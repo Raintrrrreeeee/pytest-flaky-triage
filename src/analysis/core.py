@@ -116,13 +116,13 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
             entry["suspected_polluters"] = polluters
         causes.append(entry)
 
-    if _mixed(repeat):
+    repeat_mixed = _mixed(repeat)
+    if repeat_mixed:
         add(
             ["unseeded_randomness", "race_conditions"],
             "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.",
             repeat,
         )
-        return causes
 
     # A repeat baseline guards against labelling ordinary random variation as a
     # hash/order effect. Two repeats are only an evidence floor, not proof.
@@ -150,16 +150,68 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
     consumer_isolation = (
         bool(isolated)
         and all(r["outcome"] != "passed" for r in isolated)
-        and all(r["outcome"] == "passed" for r in suite)
+        and (
+            all(r["outcome"] == "passed" for r in suite)
+            or (
+                repeat_mixed
+                and any(r["outcome"] == "passed" for r in suite)
+                and not _mixed(hash_rows)
+                and not _mixed(order_rows)
+                and not _mixed(tz_rows)
+                and (len(isolated) >= 2 or len(usable) < 10)
+            )
+        )
     )
     isolation_effect = victim_isolation or consumer_isolation
+    polluters = (
+        _find_suspected_polluters(test_id, usable, precedents_by_run)
+        if (order_effect or isolation_effect) and test_id and precedents_by_run
+        else []
+    )
+
+    if repeat_mixed:
+        strong_shared_signal = (order_effect and bool(polluters)) or (
+            isolation_effect
+            and (
+                bool(polluters)
+                or len(isolated) >= 2
+                or (
+                    not _mixed(hash_rows)
+                    and not _mixed(order_rows)
+                    and (len(usable) < 10 or repeat[0]["outcome"] == "passed")
+                )
+            )
+        )
+        if strong_shared_signal:
+            reason = (
+                "Outcomes differ across test orders, or isolated executions differ from suite executions, with a consistent repeat baseline."
+                if consumer_isolation and not (order_effect or victim_isolation)
+                else "Outcomes differ across test orders, or isolated executions pass while suite executions fail, with a consistent repeat baseline."
+            )
+            if polluters:
+                short_p = ", ".join(p.split("::")[-1] for p in polluters[:3])
+                reason = f"{reason} Suspected polluting predecessor(s): {short_p}."
+            add(
+                ["shared_state_interference"],
+                reason,
+                repeat + order_rows + isolated,
+                polluters=polluters,
+            )
+        if tz_effect and not _mixed(hash_rows) and not _mixed(order_rows):
+            add(
+                ["timezone_sensitivity"],
+                "Outcomes differ across timezones (TZ) while repeat outcomes are consistent.",
+                repeat + tz_rows,
+            )
+        return causes
 
     # Guard against small-sample repeat non-flips on probabilistic tests:
     # 1. If a test flips across two or more independent single-factor perturbations
     #    (hashseed, order, tz) in a multi-run matrix (len(repeat) >= 5), a single-factor
     #    bug cannot explain both; or
     # 2. If a test has only a single rare failure across a full matrix (>= 10 usable
-    #    runs) without an isolation recovery effect or deterministic timezone flip.
+    #    runs) without an isolation recovery effect, deterministic timezone flip, or
+    #    order-dependent polluting predecessor.
     total_nonpassing = sum(r["outcome"] != "passed" for r in usable)
     total_passing = sum(r["outcome"] == "passed" for r in usable)
     rare_single_flip = (
@@ -167,12 +219,14 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
         and min(total_nonpassing, total_passing) == 1
         and not isolation_effect
         and not tz_effect
+        and not (order_effect and bool(polluters))
     )
     single_perturbation_flips = sum([bool(hash_effect), bool(order_effect), bool(tz_effect)])
     multi_perturbation_flip = (
         len(repeat) >= 5
         and single_perturbation_flips >= 2
         and not victim_isolation
+        and not (order_effect and bool(polluters))
     )
     if rare_single_flip or multi_perturbation_flip:
         add(
@@ -189,11 +243,6 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
             repeat + hash_rows,
         )
     if order_effect or isolation_effect:
-        polluters = (
-            _find_suspected_polluters(test_id, usable, precedents_by_run)
-            if test_id and precedents_by_run
-            else []
-        )
         reason = (
             "Outcomes differ across test orders, or isolated executions differ from suite executions, with a consistent repeat baseline."
             if consumer_isolation and not (order_effect or victim_isolation)
