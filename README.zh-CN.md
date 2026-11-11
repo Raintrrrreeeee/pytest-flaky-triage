@@ -81,13 +81,13 @@
 ### 第三阶段：Python AST 静态源码消歧与诊断报告（`src/report/`）
 - **运行时证据 + AST 静态消歧与细化**：当运行时表现存在歧义（例如“未固定种子的随机数”和“多线程竞态条件”都会在相同种子和相同顺序下忽过忽挂）时，自动扫描测试与业务源码的抽象语法树（AST）完成根因消歧（`AST 消歧 *`）；当运行时已锁定 `hash_order_sensitivity` 或 `shared_state_interference` 且 AST 命中浮点数严格相等断言（`float_precision`）或未隔离文件/端口资源（`resource_leak`）时，自动细化根因类别（`AST 细化 *`）并保留原始运行时候选，同时判定责任归属（`Test Side` 测试侧 vs. `Code Side` 业务代码侧）。
 - **深度跨文件调用链与夹具追踪**：
-  - 支持跨模块追踪导入的函数、方法与类实例化调用链（深度可达 **3 层调用**，含相对导入）。
-  - 自动解析当前测试文件及各级父目录 `conftest.py` 中的 `@pytest.fixture` 夹具函数。
+  - 支持追踪同文件测试辅助函数（`_helper()`，自动附带 `via` 调用溯源）、类方法以及跨模块导入的函数与类实例化调用链（深度可达 **3 层调用**，含相对导入及 `import X as Y` / `from X import Y as Z` 别名还原）。
+  - 自动解析当前测试文件及各级父目录 `conftest.py` 中的显式 `@pytest.fixture` 参数、`autouse=True` 隐式自动夹具及多层嵌套前置夹具依赖链。
   - 追踪测试类中的 `setup_method` / `setUp` 初始化逻辑与 `self.<attr>` 属性读写。
   - 同时覆盖 `Test Side` 测试模块共享变量/夹具污染与 `Code Side` 业务模块全局变量（含 `global` 关键字修改）及类属性污染。
 - **真实工程特征覆盖与防误报抑制**：
-  - 识别 `random.*`、`uuid.uuid4`、`secrets.*`、`os.urandom`、`numpy.random`、`threading.Thread`、`ThreadPoolExecutor` 线程池、`asyncio.gather`、未显式指定时区的本地时间调用（`datetime.now()`、`date.today()`、无 `tz` 的 `datetime.fromtimestamp(ts)`、`time.localtime()`、未搭配 `gmtime` 的 `time.strftime()`）、硬编码文件/数据库路径读写与固定非零端口绑定（`open(..., "w")`、`Path(...).write_text()`、`sqlite3.connect("...")`、`.bind((host, 8080))` -> `resource_leak` 文件与端口资源冲突）、未 Mock 的外部网络调用（`requests.*`、`httpx.*`、`urllib.request.urlopen`、`aiohttp.ClientSession`、`socket.create_connection` -> `external_io` 未隔离的外部网络依赖），以及浮点数严格相等断言（对浮点数运算/`sum(...)`/除法直接写 `assert a == b` -> `float_precision` 浮点数精度断言隐患）。
-  - 自动排除已固定常量随机种子（如 `random.seed(42)`）、已排序集合（`sorted(...)`）、路径拼接（`os.path.join`）、显式状态重置函数（`reset_*` / `clear_*`）、显式指定时区参数（`tz=timezone.utc`、`time.gmtime`）、时间冻结工具（`@freeze_time`、`freezegun`、`freezer` 夹具、`monkeypatch.setenv("TZ", ...)`）、临时目录与动态端口（`tmp_path`、`tmpdir`、`tempfile.*`、`:memory:`、动态端口 `0`）、网络打桩拦截（`monkeypatch`、`mocker`、`@patch`、`responses`、`respx`、`httpretty`、`requests_mock`）以及安全近似比较（`pytest.approx`、`math.isclose`、`np.isclose`、`round`、`Decimal`）的安全代码。
+  - 识别 `random.*`、`uuid.uuid4`、`secrets.*`、`os.urandom`、`numpy.random`、`threading.Thread`、`ThreadPoolExecutor` 线程池、`asyncio.gather`、未显式指定时区的本地时间调用（`datetime.now()`、`date.today()`、无 `tz` 的 `datetime.fromtimestamp(ts)`、`time.localtime()`、未搭配 `gmtime` 的 `time.strftime()`）、硬编码文件/数据库路径读写与固定非零端口绑定（`open(..., "w")`、`Path(...).write_text()`、`sqlite3.connect("...")`、`.bind((host, 8080))` -> `resource_leak` 文件与端口资源冲突）、未 Mock 的外部网络调用（`requests.*`、`httpx.*`、`urllib.request.urlopen`、`aiohttp.ClientSession`、`socket.create_connection` -> `external_io` 未隔离的外部网络依赖，且在伴随 `uuid4` 追踪 ID 或 `time.sleep` 重试退避时具备防阴影覆盖优先级），以及浮点数严格相等断言（对浮点字面量、`@pytest.mark.parametrize` 浮点参数、`: float` / `-> float` 类型注解、`sum(...)` 或四则运算结果直接写 `assert a == b` -> `float_precision` 浮点数精度断言隐患）。
+  - 在具体调用表达式粒度自动排除已固定常量随机种子（如 `random.seed(42)`）、已排序集合（`sorted(...)`）、路径拼接（`os.path.join`）、显式状态重置函数（`reset_*` / `clear_*`）、显式指定时区参数（`tz=timezone.utc`、`time.gmtime`）、时间冻结工具（`@freeze_time`、`freezegun`、`freezer` 夹具、`monkeypatch.setenv("TZ", ...)`）、临时目录与动态端口（`tmp_path`、`tmpdir`、`tempfile.*`、`:memory:`、动态端口 `0`）、指向网络目标的精准打桩拦截（`monkeypatch.setattr`、`mocker.patch`、`@patch`、`responses`、`respx`、`httpretty`、`requests_mock`）以及安全近似比较（`pytest.approx`、`math.isclose`、`np.isclose`、`round`、`Decimal`）的安全代码。
 - **双格式可追溯输出**：同时生成供 CI/CD 流水线读取的 `diagnosis.json`（包含最终消歧结论 `resolution`）和供开发者阅读的 `report.md`（优先展示失败场次日志链接，并精确标注源码 `文件名:行号`）。
 
 ---
@@ -140,9 +140,9 @@ cat ./out/report.md
 
 ---
 
-### 方式二：克隆完整仓库（包含源码、演示靶场与 132 项自测套件）
+### 方式二：克隆完整仓库（包含源码、演示靶场与 139 项自测套件）
 
-如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 132 个自动化测试用例：
+如果你想直接体验完整的演示脚本、阅读源码或运行本工具自带的 139 个自动化测试用例：
 
 **macOS / Linux：**
 ```bash
@@ -159,7 +159,7 @@ pytest-flaky-triage --demo --lang zh
 # 2. 查看生成的 Markdown 诊断报告：
 cat out/report.md
 
-# 3. 运行工具自身的 132 个单元与集成测试：
+# 3. 运行工具自身的 139 个单元与集成测试：
 bash scripts/test.sh
 ```
 
@@ -179,7 +179,7 @@ pytest-flaky-triage --demo --lang zh
 # 2. 查看生成的 Markdown 诊断报告：
 Get-Content -Encoding utf8 out\report.md
 
-# 3. 运行工具自身的 132 个单元与集成测试：
+# 3. 运行工具自身的 139 个单元与集成测试：
 pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 ```
 

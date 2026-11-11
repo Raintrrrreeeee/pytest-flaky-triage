@@ -1438,6 +1438,7 @@ def test_external_io_ast_heuristics_disambiguation_and_mock_suppression(tmp_path
         "    gw = Gateway()\n"
         "    assert gw.fetch_profile(1) is not None\n\n"
         "def test_suppressed_with_monkeypatch(monkeypatch):\n"
+        "    monkeypatch.setattr('net.client.requests.get', lambda *a, **kw: None)\n"
         "    gw = Gateway()\n"
         "    assert gw.fetch_profile(1) is not None\n\n"
         "@patch('net.client.requests.get')\n"
@@ -1669,6 +1670,285 @@ def test_stage2_stage3_contract_refinement_and_external_io_reasons(tmp_path):
         "> - **运行时怀疑根因 (`ambiguous` -> 已由 AST 启发式提示消歧):** "
         "`external_io` — 因存在未 Mock 拦截的外部网络请求，导致重复运行下结果发生波动或超时。"
     ) in md_io_zh
+
+
+def test_ast_import_alias_resolution_across_categories(tmp_path):
+    """Scenario 1: import aliases (import X as Y, from X import Y as Z) resolve to canonical primitives."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_aliases.py").write_text(
+        "import datetime as dt\n"
+        "from random import randint as rint\n"
+        "import sqlite3 as sq\n"
+        "import requests as req\n\n"
+        "def test_dt_alias():\n"
+        "    now = dt.datetime.now()\n"
+        "    assert now is not None\n\n"
+        "def test_random_from_alias():\n"
+        "    val = rint(1, 5)\n"
+        "    assert val >= 1\n\n"
+        "def test_sqlite_alias():\n"
+        "    conn = sq.connect('a.db')\n"
+        "    conn.close()\n\n"
+        "def test_requests_alias():\n"
+        "    resp = req.get('https://example.com/api')\n"
+        "    assert resp is not None\n",
+        encoding="utf-8",
+    )
+
+    info_tz = inspect_test_source("tests/test_aliases.py::test_dt_alias", project_dir=tmp_path)
+    assert len(info_tz["indicators"]["timezone_sensitivity"]) == 1
+    assert "`datetime.now()`" in info_tz["indicators"]["timezone_sensitivity"][0]["detail"]
+
+    info_rand = inspect_test_source("tests/test_aliases.py::test_random_from_alias", project_dir=tmp_path)
+    assert len(info_rand["indicators"]["unseeded_randomness"]) == 1
+    assert "`random.randint(...)`" in info_rand["indicators"]["unseeded_randomness"][0]["detail"]
+
+    info_leak = inspect_test_source("tests/test_aliases.py::test_sqlite_alias", project_dir=tmp_path)
+    assert len(info_leak["indicators"]["resource_leak"]) == 1
+    assert "`sqlite3.connect(...)`" in info_leak["indicators"]["resource_leak"][0]["detail"]
+
+    info_io = inspect_test_source("tests/test_aliases.py::test_requests_alias", project_dir=tmp_path)
+    assert len(info_io["indicators"]["external_io"]) == 1
+    assert "`requests.get(...)`" in info_io["indicators"]["external_io"][0]["detail"]
+
+
+def test_ast_same_file_helper_delegation_and_via_attribution(tmp_path):
+    """Scenario 2: Test function delegating to same-file _run_check() helper tracks Test Side with via attribution."""
+    src_dir = tmp_path / "src" / "math_pkg"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "ops.py").write_text(
+        "def calc():\n"
+        "    return 0.1 + 0.2\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_helpers.py").write_text(
+        "import random\n"
+        "from math_pkg.ops import calc\n\n"
+        "def _run_check():\n"
+        "    assert calc() == 0.3\n\n"
+        "def _pick_random_token():\n"
+        "    return random.random()\n\n"
+        "def test_delegated_float_assert():\n"
+        "    _run_check()\n\n"
+        "def test_delegated_random_helper():\n"
+        "    assert _pick_random_token() >= 0.0\n",
+        encoding="utf-8",
+    )
+
+    info_float = inspect_test_source(
+        "tests/test_helpers.py::test_delegated_float_assert", project_dir=tmp_path
+    )
+    assert len(info_float["indicators"]["float_precision"]) == 1
+    hit_f = info_float["indicators"]["float_precision"][0]
+    assert hit_f["side"] == "Test Side"
+    assert "(via `_run_check(...)`)" in hit_f["detail"]
+
+    info_rand = inspect_test_source(
+        "tests/test_helpers.py::test_delegated_random_helper", project_dir=tmp_path
+    )
+    assert len(info_rand["indicators"]["unseeded_randomness"]) == 1
+    hit_r = info_rand["indicators"]["unseeded_randomness"][0]
+    assert hit_r["side"] == "Test Side"
+    assert "(via `_pick_random_token(...)`)" in hit_r["detail"]
+
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/test_helpers.py::test_delegated_random_helper"
+    diag["tests"][1]["suspected_causes"] = [
+        {
+            "candidates": ["unseeded_randomness", "race_conditions"],
+            "status": "ambiguous",
+            "reason": "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.",
+            "run_ids": [1, 2],
+        }
+    ]
+    md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
+    assert "（经由辅助函数 `_pick_random_token(...)` 调用）" in md_zh
+
+
+def test_ast_autouse_fixture_and_nested_fixture_chain(tmp_path):
+    """Scenario 3: autouse=True fixture and upstream fixture dependencies in conftest.py are scanned."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "conftest.py").write_text(
+        "import sqlite3\n"
+        "import pytest\n\n"
+        "@pytest.fixture\n"
+        "def upstream_db():\n"
+        "    return sqlite3.connect('leaky_upstream.db')\n\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def auto_db(upstream_db):\n"
+        "    conn = sqlite3.connect('leaky.db')\n"
+        "    return conn\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_autouse.py").write_text(
+        "def test_clean():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    info = inspect_test_source("tests/test_autouse.py::test_clean", project_dir=tmp_path)
+    leak_hits = info["indicators"]["resource_leak"]
+    assert len(leak_hits) >= 2
+    locations = [h["location"] for h in leak_hits]
+    assert any(loc.startswith("tests/conftest.py:") for loc in locations)
+
+
+def test_ast_mixed_tmp_path_and_hardcoded_path_in_same_function(tmp_path):
+    """Scenario 4: tmp_path parameter only exempts paths derived from tmp_path, not hardcoded paths in the same test."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_mixed_paths.py").write_text(
+        "def test_mixed(tmp_path):\n"
+        "    ok_file = tmp_path / 'ok.txt'\n"
+        "    ok_file.write_text('safe')\n"
+        "    with open('bad_global.txt', 'w') as f:\n"
+        "        f.write('leak')\n\n"
+        "def test_only_tmp(tmp_path):\n"
+        "    ok_file = tmp_path / 'ok.txt'\n"
+        "    with open(ok_file, 'w') as f:\n"
+        "        f.write('safe')\n",
+        encoding="utf-8",
+    )
+
+    info_mixed = inspect_test_source(
+        "tests/test_mixed_paths.py::test_mixed", project_dir=tmp_path
+    )
+    assert len(info_mixed["indicators"]["resource_leak"]) == 1
+    assert info_mixed["indicators"]["resource_leak"][0]["location"] == "tests/test_mixed_paths.py:4"
+    assert "`open(...)`" in info_mixed["indicators"]["resource_leak"][0]["detail"]
+
+    info_safe = inspect_test_source(
+        "tests/test_mixed_paths.py::test_only_tmp", project_dir=tmp_path
+    )
+    assert info_safe["indicators"]["resource_leak"] == []
+
+
+def test_ast_non_network_monkeypatch_does_not_suppress_external_io(tmp_path):
+    """Scenario 5: monkeypatch.setenv('TOKEN', 'x') does NOT suppress external_io, whereas monkeypatch.setattr on requests does."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_monkeypatch_net.py").write_text(
+        "import requests\n\n"
+        "def test_api_unmocked_with_setenv(monkeypatch):\n"
+        "    monkeypatch.setenv('TOKEN', 'x')\n"
+        "    requests.get('http://example.com')\n\n"
+        "def test_api_mocked_with_setattr(monkeypatch):\n"
+        "    monkeypatch.setattr(requests, 'get', lambda *a, **kw: None)\n"
+        "    requests.get('http://example.com')\n",
+        encoding="utf-8",
+    )
+
+    info_unmocked = inspect_test_source(
+        "tests/test_monkeypatch_net.py::test_api_unmocked_with_setenv", project_dir=tmp_path
+    )
+    assert len(info_unmocked["indicators"]["external_io"]) == 1
+    assert "`requests.get(...)`" in info_unmocked["indicators"]["external_io"][0]["detail"]
+
+    info_mocked = inspect_test_source(
+        "tests/test_monkeypatch_net.py::test_api_mocked_with_setattr", project_dir=tmp_path
+    )
+    assert info_mocked["indicators"]["external_io"] == []
+
+
+def test_ast_external_io_not_shadowed_by_uuid4_or_sleep(tmp_path):
+    """Scenario 6: external_io takes priority over incidental uuid.uuid4() trace IDs and time.sleep() backoff."""
+    src_dir = tmp_path / "src" / "webhook"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "sender.py").write_text(
+        "import time\n"
+        "import uuid\n"
+        "import requests\n\n"
+        "def send_event(payload):\n"
+        "    req_id = str(uuid.uuid4())\n"
+        "    time.sleep(0.01)\n"
+        "    return requests.post('https://api.example.com/v1/events', json=payload, headers={'X-Req-Id': req_id})\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_webhook.py").write_text(
+        "from webhook.sender import send_event\n\n"
+        "def test_send_event():\n"
+        "    resp = send_event({'ok': True})\n"
+        "    assert resp is not None\n",
+        encoding="utf-8",
+    )
+
+    ambiguous_cause = [
+        {
+            "candidates": ["unseeded_randomness", "race_conditions"],
+            "status": "ambiguous",
+            "reason": "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.",
+            "run_ids": [1, 2],
+        }
+    ]
+    info = inspect_test_source("tests/test_webhook.py::test_send_event", project_dir=tmp_path)
+    res = disambiguate_causes(ambiguous_cause, info)
+    assert res["resolved_candidates"] == ["external_io"]
+    assert res["disambiguated"] is True
+    assert res["fault_side"] == "Code Side"
+    assert ambiguous_cause[0]["candidates"] == ["external_io"]
+
+
+def test_ast_parametrize_and_type_annotated_float_precision(tmp_path):
+    """Scenario 7: @pytest.mark.parametrize float values and : float / -> float annotations trigger float_precision."""
+    src_dir = tmp_path / "src" / "Adder"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "core.py").write_text(
+        "def add_annotated(x: float, y: float) -> float:\n"
+        "    return x + y\n\n"
+        "def add_unannotated(x, y):\n"
+        "    return x + y\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_param_float.py").write_text(
+        "import pytest\n"
+        "from Adder.core import add_annotated, add_unannotated\n\n"
+        "@pytest.mark.parametrize('a, b', [(0.1, 0.2)])\n"
+        "def test_param_annotated(a, b):\n"
+        "    res = add_annotated(a, b)\n"
+        "    assert res == 0.3\n\n"
+        "@pytest.mark.parametrize('a, b', [(0.1, 0.2)])\n"
+        "def test_param_unannotated_inline(a, b):\n"
+        "    res = add_unannotated(a, b)\n"
+        "    assert res == 0.3\n\n"
+        "def test_type_annotated_params(x: float, y: float, expected: float):\n"
+        "    total = x + y\n"
+        "    assert total == expected\n",
+        encoding="utf-8",
+    )
+
+    for test_name in (
+        "test_param_annotated",
+        "test_param_unannotated_inline",
+        "test_type_annotated_params",
+    ):
+        hash_cause = [
+            {
+                "candidates": ["hash_order_sensitivity"],
+                "status": "suspected",
+                "reason": "Outcomes differ across hash seeds while repeat outcomes are consistent.",
+                "run_ids": [1, 2],
+            }
+        ]
+        info = inspect_test_source(f"tests/test_param_float.py::{test_name}", project_dir=tmp_path)
+        res = disambiguate_causes(hash_cause, info)
+        assert res["resolved_candidates"] == ["float_precision"], test_name
+        assert res["refined"] is True, test_name
+        assert res["fault_side"] == "Test Side", test_name
+
 
 
 
