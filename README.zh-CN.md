@@ -187,11 +187,44 @@ pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 
 ## 命令行参数与实验矩阵说明
 
+### 可用命令与常用运行模式（Available Commands）
+
 ```bash
-pytest-flaky-triage --project PATH [options]
-# 或者在仓库根目录下运行：
-scripts/detect.sh --project PATH [options]
+# 1. 标准全流程诊断（依次执行 Stage 1 矩阵运行 -> Stage 2 统计归因 -> Stage 3 AST 消歧与报告生成）
+pytest-flaky-triage --project /path/to/project --out ./out
+pytest-flaky-triage --project /path/to/project --out ./out --lang zh   # 生成简体中文报告
+
+# 2. 内置演示靶场一键体验（自动对内置的 22 个基准测试执行全流程诊断）
+pytest-flaky-triage --demo
+pytest-flaky-triage --demo --lang zh
+
+# 3. 仅重新生成报告模式（--report-only：跳过 Stage 1，直接基于 out/ 已有数据秒级重跑 Stage 2/3 或切换语言）
+pytest-flaky-triage --project /path/to/project --out ./out --lang zh --report-only
+pytest-flaky-triage --project /path/to/project --out ./out --lang en --report-only
+
+# 4. 仅采集实验数据模式（--no-report：只跑完 Stage 1 生成 results.csv 与 run_meta.csv，跳过 Stage 2/3）
+pytest-flaky-triage --project /path/to/project --out ./out --no-report
+
+# 5. 大型项目定向筛选与智能加速运行（指定测试子集、外部虚拟环境解释器、仅对异常测试执行单测隔离）
+pytest-flaky-triage --project /path/to/project \
+  --target tests/unit/test_order.py \
+  -k "checkout or payment" \
+  --isolated-scope smart \
+  --python /path/to/venv/bin/python \
+  --out ./out --lang zh
+
+# 6. 单独调用第二阶段（Stage 2：基于已有 CSV 重新计算统计得分与 diagnosis.json）
+python -m analysis --results ./out/results.csv --run-meta ./out/run_meta.csv --out ./out/diagnosis.json
+
+# 7. 单独调用第三阶段（Stage 3：基于已有 diagnosis.json 重新执行 AST 源码扫描并渲染 report.md）
+python -m report --diagnosis ./out/diagnosis.json --out ./out/report.md --project /path/to/project --lang zh
+
+# 8. 查看完整命令行帮助（或在仓库根目录下使用等效脚本 scripts/detect.sh）
+pytest-flaky-triage --help
+scripts/detect.sh --project /path/to/project [options]
 ```
+
+### 五维实验矩阵（Perturbation Matrix）
 
 五个实验条件各自只改变一个影响因子，保持其余条件恒定：
 
@@ -207,7 +240,8 @@ scripts/detect.sh --project PATH [options]
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `--project PATH` | （必填） | 待检测的目标 `pytest` 项目路径 |
+| `--project PATH` | （必填，除非使用 `--demo`） | 待检测的目标 `pytest` 项目根目录路径 |
+| `--demo` | 关闭 | 一键运行内置的 22 个电商基准测试演示靶场（`scenario/`），输出至 `./out` |
 | `--target SUBPATH` | （整个项目） | 仅收集并检测项目下指定的测试文件、子目录或节点 ID |
 | `-k EXPR` | （无） | 仅运行匹配 `pytest -k EXPR` 表达式的测试 |
 | `--repeats N` | `10` | `repeat` 基准重复运行轮数（`N >= 1`） |
@@ -220,8 +254,9 @@ scripts/detect.sh --project PATH [options]
 | `--out DIR` | `out/` | 诊断产物输出目录（自动拦截 `/`、`$HOME`、软链接及包含目标项目的危险路径） |
 | `--python PATH` | 自动探测 | 指定运行目标项目的 Python 解释器路径 |
 | `--lang LANG` | `en` | 诊断报告 `report.md` 的输出语言：`en`（英文，默认）或 `zh`（简体中文，也可直接传给 `python -m report ... --lang zh`） |
-| `--report-only` | 关闭 | 基于 `out/` 下已有的运行结果直接重新生成 `report.md`（例如秒切中英文报告，无需重跑 `pytest`） |
-| `--no-report` | 关闭 | 仅生成 `results.csv` 和 `run_meta.csv`，不执行后续分析与报告生成 |
+| `--report-only` | 关闭 | 跳过第一阶段 `pytest` 矩阵执行，直接基于 `--out` 目录已有的 CSV / `diagnosis.json` 重新生成 `report.md`（支持秒切中英文报告） |
+| `--no-report` | 关闭 | 仅执行第一阶段并写出 `results.csv` 和 `run_meta.csv`，跳过第二阶段统计分析与第三阶段报告生成 |
+| `-h`, `--help` | — | 打印命令行用法说明与全部可用参数并退出 |
 
 ### 退出状态码（Exit Codes）
 

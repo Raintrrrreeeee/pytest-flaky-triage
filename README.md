@@ -187,11 +187,44 @@ pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 
 ## CLI Usage & Perturbation Matrix
 
+### Available Commands & Common Modes
+
 ```bash
-pytest-flaky-triage --project PATH [options]
-# or from a repository checkout:
-scripts/detect.sh --project PATH [options]
+# 1. Full end-to-end triage (Stage 1 matrix runner -> Stage 2 causal analysis -> Stage 3 AST report)
+pytest-flaky-triage --project /path/to/project --out ./out
+pytest-flaky-triage --project /path/to/project --out ./out --lang zh   # Simplified Chinese report
+
+# 2. Built-in 22-test benchmark demo mode
+pytest-flaky-triage --demo
+pytest-flaky-triage --demo --lang zh
+
+# 3. Report-only mode (--report-only: skip Stage 1 pytest runs and regenerate report.md from existing out/ data)
+pytest-flaky-triage --project /path/to/project --out ./out --lang zh --report-only
+pytest-flaky-triage --project /path/to/project --out ./out --lang en --report-only
+
+# 4. Data-collection-only mode (--no-report: run Stage 1 to produce results.csv & run_meta.csv, skip Stage 2/3)
+pytest-flaky-triage --project /path/to/project --out ./out --no-report
+
+# 5. Targeted & accelerated run for large projects (filter tests, custom venv Python, smart isolation)
+pytest-flaky-triage --project /path/to/project \
+  --target tests/unit/test_order.py \
+  -k "checkout or payment" \
+  --isolated-scope smart \
+  --python /path/to/venv/bin/python \
+  --out ./out
+
+# 6. Run Stage 2 standalone (statistical scoring & polluter inference from existing CSVs)
+python -m analysis --results ./out/results.csv --run-meta ./out/run_meta.csv --out ./out/diagnosis.json
+
+# 7. Run Stage 3 standalone (AST source disambiguation & Markdown report rendering from diagnosis.json)
+python -m report --diagnosis ./out/diagnosis.json --out ./out/report.md --project /path/to/project --lang en
+
+# 8. Show CLI help (or invoke the equivalent repository script scripts/detect.sh)
+pytest-flaky-triage --help
+scripts/detect.sh --project /path/to/project [options]
 ```
+
+### Five-Dimension Perturbation Matrix
 
 Each condition changes one factor and keeps the others fixed:
 
@@ -207,7 +240,8 @@ Each condition changes one factor and keeps the others fixed:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--project PATH` | (required) | pytest project to investigate |
+| `--project PATH` | (required unless `--demo`) | pytest project root directory to investigate |
+| `--demo` | off | run the built-in 22-test benchmark suite (`scenario/`) and write outputs to `./out` |
 | `--target SUBPATH` | (entire project) | restrict collection to a specific test file, directory, or node ID |
 | `-k EXPR` | (none) | only collect tests matching pytest keyword expression `EXPR` |
 | `--repeats N` | `10` | plain repeated runs (`N >= 1`) |
@@ -220,8 +254,9 @@ Each condition changes one factor and keeps the others fixed:
 | `--out DIR` | `out/` | output folder (rejects `/`, `$HOME`, symlinks, and folders containing `--project`) |
 | `--python PATH` | auto-detected | interpreter with `pytest` and the target project's dependencies installed |
 | `--lang LANG` | `en` | report language for `report.md`: `en` (English) or `zh` (Simplified Chinese) |
-| `--report-only` | off | regenerate `report.md` from existing `out/` results without re-running `pytest` |
-| `--no-report` | off | stop after writing `results.csv` and `run_meta.csv` |
+| `--report-only` | off | skip Stage 1 `pytest` execution and regenerate `report.md` from existing `--out` data (e.g., switch report language instantly) |
+| `--no-report` | off | run Stage 1 only (write `results.csv` and `run_meta.csv`) and skip Stage 2 analysis and Stage 3 report generation |
+| `-h`, `--help` | — | show command-line usage and all available options, then exit |
 
 ### Exit Codes
 
