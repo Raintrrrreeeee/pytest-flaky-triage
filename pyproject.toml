@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytest-flaky-triage"
-version = "2.3.1"
+version = "2.3.3"
 description = "Three-stage pytest flaky-test detection, statistical root-cause inference, and AST fault-side triage tool"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -55,3 +55,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 flaky_triage = ["runtime/*.sh", "runtime/lib/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["scenario", "out", ".git", ".venv", "build", "dist"]
+addopts = ["--ignore=tests/fixtures"]
+

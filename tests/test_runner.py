@@ -10,7 +10,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DETECT = ROOT / "scripts" / "detect.sh"
 FIXTURES = ROOT / "tests" / "fixtures" / "parser"
 GOOD_PROJECT = str(FIXTURES / "outcomes")
-OUT = str(ROOT / "out" / "selftest" / "runner")
 
 
 def detect(*args):
@@ -56,8 +55,8 @@ def test_bad_arguments_exit_2(args, message):
     assert message in result.stderr
 
 
-def test_missing_pytest_exits_3():
-    result = detect("--project", GOOD_PROJECT, "--out", OUT, "--python", "/usr/bin/false")
+def test_missing_pytest_exits_3(tmp_path):
+    result = detect("--project", GOOD_PROJECT, "--out", str(tmp_path / "runner"), "--python", "/usr/bin/false")
     assert result.returncode == 3
     assert "pytest is not installed" in result.stderr
 
@@ -66,14 +65,14 @@ def test_missing_pytest_exits_3():
     ("collection_error", "could not collect"),
     ("no_tests", "found no tests"),
 ])
-def test_collection_problems_exit_4(case, message):
-    result = detect("--project", str(FIXTURES / case), "--out", OUT, "--no-report")
+def test_collection_problems_exit_4(tmp_path, case, message):
+    result = detect("--project", str(FIXTURES / case), "--out", str(tmp_path / "runner"), "--no-report")
     assert result.returncode == 4
     assert message in result.stderr
 
 
-def test_failed_collection_keeps_previous_results():
-    out = OUT + "_keep"
+def test_failed_collection_keeps_previous_results(tmp_path):
+    out = str(tmp_path / "runner_keep")
     first = detect("--project", GOOD_PROJECT, "--out", out, "--no-report",
                    "--repeats", "1", "--hash-seeds", "", "--orders", "0", "--isolated", "0")
     assert first.returncode == 0, first.stderr
@@ -91,8 +90,7 @@ def test_symlinked_output_outside_tool_is_rejected(tmp_path):
     sentinel = logs / "sentinel.txt"
     sentinel.write_text("must survive runner validation\n")
 
-    link = ROOT / "out" / "selftest" / "external_link"
-    link.parent.mkdir(parents=True, exist_ok=True)
+    link = tmp_path / "external_link"
     if link.exists() or link.is_symlink():
         link.unlink()
     try:
@@ -102,16 +100,15 @@ def test_symlinked_output_outside_tool_is_rejected(tmp_path):
     try:
         result = detect("--project", GOOD_PROJECT, "--out", str(link), "--no-report")
     finally:
-        link.unlink()
+        link.unlink(missing_ok=True)
 
     assert result.returncode == 2
     assert "--out must not be a symlink" in result.stderr
     assert sentinel.read_text() == "must survive runner validation\n"
 
 
-def test_symlink_alias_of_the_project_is_rejected():
-    link = ROOT / "out" / "selftest" / "link_to_project"
-    link.parent.mkdir(parents=True, exist_ok=True)
+def test_symlink_alias_of_the_project_is_rejected(tmp_path):
+    link = tmp_path / "link_to_project"
     link.unlink(missing_ok=True)
     try:
         link.symlink_to(FIXTURES / "outcomes", target_is_directory=True)
@@ -120,7 +117,7 @@ def test_symlink_alias_of_the_project_is_rejected():
     try:
         result = detect("--project", GOOD_PROJECT, "--out", str(link), "--no-report")
     finally:
-        link.unlink()
+        link.unlink(missing_ok=True)
     assert result.returncode == 2
     assert "must not be" in result.stderr
 
@@ -150,9 +147,9 @@ def test_output_folder_containing_the_project_is_rejected():
     assert "must not contain the project folder" in result.stderr
 
 
-def test_leading_zero_numbers_are_decimal():
+def test_leading_zero_numbers_are_decimal(tmp_path):
     # 08 is not valid octal; Bash arithmetic would reject it without 10#
-    result = detect("--project", GOOD_PROJECT, "--out", OUT, "--no-report",
+    result = detect("--project", GOOD_PROJECT, "--out", str(tmp_path / "runner"), "--no-report",
                     "--repeats", "08", "--hash-seeds", "", "--orders", "0", "--timezones", "", "--isolated", "0")
     assert result.returncode == 0, result.stderr
     assert "planned 8 runs" in result.stderr

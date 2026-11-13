@@ -8,6 +8,7 @@ import csv
 import os
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -16,7 +17,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 DETECT = ROOT / "scripts" / "detect.sh"
 FIXTURES = ROOT / "tests" / "fixtures" / "parser"
-SELFTEST_OUT = ROOT / "out" / "selftest"
 
 # One plain run only, so expected.csv describes run 1.
 SINGLE_RUN = ["--repeats", "1", "--hash-seeds", "", "--orders", "0", "--timezones", "", "--isolated", "0"]
@@ -54,8 +54,9 @@ DETERMINISTIC = [
 ]
 
 
-def run_detect(case, *options, out_name=None):
-    out_dir = SELFTEST_OUT / (out_name or case)
+def run_detect(case, *options, out_name=None, base_dir=None):
+    root_out = base_dir if base_dir is not None else Path(tempfile.mkdtemp(prefix="flaky-selftest-"))
+    out_dir = root_out / (out_name or case)
     if os.name == "nt" or os.environ.get("FLAKY_PURE_PYTHON") == "1":
         env = os.environ.copy()
         env["FLAKY_PURE_PYTHON"] = "1"
@@ -83,9 +84,9 @@ def read_csv(path):
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
-def test_results_match_expected_csv(case):
+def test_results_match_expected_csv(tmp_path, case):
     options, expected_exit = CASES[case]
-    result, out_dir = run_detect(case, *SINGLE_RUN, *options)
+    result, out_dir = run_detect(case, *SINGLE_RUN, *options, base_dir=tmp_path)
 
     assert result.returncode == expected_exit, result.stderr
     expected = read_csv(FIXTURES / case / "expected.csv")
@@ -94,12 +95,13 @@ def test_results_match_expected_csv(case):
 
 
 @pytest.mark.parametrize("case", DETERMINISTIC)
-def test_outcomes_agree_across_all_conditions(case):
+def test_outcomes_agree_across_all_conditions(tmp_path, case):
     """Order and isolated runs pass node IDs on the command line, so IDs with
     spaces, brackets, commas or quotes must survive that round trip."""
     result, out_dir = run_detect(
         case, "--repeats", "2", "--hash-seeds", "1 2", "--orders", "2", "--isolated", "1",
         out_name=case + "_matrix",
+        base_dir=tmp_path,
     )
     assert result.returncode == 0, result.stderr
 
@@ -120,10 +122,11 @@ def test_outcomes_agree_across_all_conditions(case):
     }
 
 
-def test_shuffled_runs_keep_every_test_once():
+def test_shuffled_runs_keep_every_test_once(tmp_path):
     result, out_dir = run_detect(
         "param_ids", "--repeats", "1", "--hash-seeds", "", "--orders", "3", "--timezones", "", "--isolated", "0",
         out_name="param_ids_orders",
+        base_dir=tmp_path,
     )
     assert result.returncode == 0, result.stderr
 
@@ -146,16 +149,16 @@ def test_shuffled_runs_keep_every_test_once():
         ("crash_before_tests", "crashed", "9"),
     ],
 )
-def test_run_meta_records_abnormal_runs(case, status, exit_code):
+def test_run_meta_records_abnormal_runs(tmp_path, case, status, exit_code):
     options, _ = CASES[case]
-    _, out_dir = run_detect(case, *SINGLE_RUN, *options, out_name=case + "_meta")
+    _, out_dir = run_detect(case, *SINGLE_RUN, *options, out_name=case + "_meta", base_dir=tmp_path)
     (meta,) = read_csv(out_dir / "run_meta.csv")
     assert (meta["status"], meta["exit_code"]) == (status, exit_code)
 
 
-def test_exit_code_1_crash_is_flagged():
+def test_exit_code_1_crash_is_flagged(tmp_path):
     """os._exit(1) looks like "tests failed"; the row count gives it away."""
-    result, out_dir = run_detect("exit1_midrun", *SINGLE_RUN, out_name="exit1_meta")
+    result, out_dir = run_detect("exit1_midrun", *SINGLE_RUN, out_name="exit1_meta", base_dir=tmp_path)
     (meta,) = read_csv(out_dir / "run_meta.csv")
     assert (meta["tests_expected"], meta["tests_reported"]) == ("3", "1")
     assert "reported only 1 of 3 tests" in result.stderr

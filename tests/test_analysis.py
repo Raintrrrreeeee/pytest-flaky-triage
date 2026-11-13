@@ -450,3 +450,46 @@ def test_analysis_mixed_repeat_does_not_swallow_strong_isolation_or_order_pollut
     assert shared[0]["suspected_polluters"] == ["test_polluter"]
 
 
+def test_analysis_cli_positional_and_flag_arguments(tmp_path):
+    """Verify analysis.__main__.main supports both positional arguments and README flag arguments."""
+    results_csv = write_matrix(tmp_path, [("repeat", "1", "passed"), ("repeat", "2", "failed")])
+    run_meta_csv = tmp_path / "run_meta.csv"
+
+    # 1. Positional invocation: python -m analysis <results_csv> <output_dir>
+    pos_out_dir = tmp_path / "pos_out"
+    assert main([str(results_csv), str(pos_out_dir)]) == 0
+    pos_diag = json.loads((pos_out_dir / "diagnosis.json").read_text(encoding="utf-8"))
+    assert pos_diag["summary"]["verdicts"]["flaky"] == 1
+
+    # 2. README flag invocation with explicit .json output path and --run-meta:
+    #    python -m analysis --results ./out/results.csv --run-meta ./out/run_meta.csv --out ./out/diagnosis.json
+    flag_out_file = tmp_path / "flag_out" / "diagnosis.json"
+    assert (
+        main(
+            [
+                "--results",
+                str(results_csv),
+                "--run-meta",
+                str(run_meta_csv),
+                "--out",
+                str(flag_out_file),
+            ]
+        )
+        == 0
+    )
+    assert flag_out_file.is_file()
+    flag_diag = json.loads(flag_out_file.read_text(encoding="utf-8"))
+    assert flag_diag == pos_diag
+
+    # 3. Flag invocation without --run-meta and with --out pointing to a directory
+    dir_flag_out = tmp_path / "dir_flag_out"
+    assert main(["--results", str(results_csv), "--out", str(dir_flag_out)]) == 0
+    assert (dir_flag_out / "diagnosis.json").is_file()
+
+    # 4. Missing required arguments exits with code 2
+    with pytest.raises(SystemExit) as exc:
+        main(["--results", str(results_csv)])
+    assert exc.value.code == 2
+
+
+

@@ -1950,6 +1950,51 @@ def test_ast_parametrize_and_type_annotated_float_precision(tmp_path):
         assert res["fault_side"] == "Test Side", test_name
 
 
+def test_report_cli_positional_and_flag_arguments(tmp_path):
+    """Verify report.__main__.main supports both positional arguments and README flag arguments."""
+    diag = _sample_diagnosis()
+    diag_file = tmp_path / "diagnosis.json"
+    diag_file.write_text(json.dumps(diag), encoding="utf-8")
+
+    # 1. Positional invocation: python -m report <diagnosis_json> <output_dir>
+    pos_out_dir = tmp_path / "pos_out"
+    assert main([str(diag_file), str(pos_out_dir)]) == 0
+    pos_report = (pos_out_dir / "report.md").read_text(encoding="utf-8")
+    assert "# Test-Stability Triage Report" in pos_report
+
+    # 2. README flag invocation with explicit .md output path:
+    #    python -m report --diagnosis ./out/diagnosis.json --out ./out/report.md --project /path/to/project --lang en
+    flag_out_file = tmp_path / "flag_out" / "report.md"
+    assert (
+        main(
+            [
+                "--diagnosis",
+                str(diag_file),
+                "--out",
+                str(flag_out_file),
+                "--project",
+                str(tmp_path),
+                "--lang",
+                "en",
+            ]
+        )
+        == 0
+    )
+    assert flag_out_file.is_file()
+    assert flag_out_file.read_text(encoding="utf-8") == pos_report
+
+    # 3. Flag invocation with --out pointing to a directory and --lang zh
+    zh_out_dir = tmp_path / "zh_flag_out"
+    assert main(["--diagnosis", str(diag_file), "--out", str(zh_out_dir), "--lang", "zh"]) == 0
+    assert "# 测试稳定性诊断报告" in (zh_out_dir / "report.md").read_text(encoding="utf-8")
+
+    # 4. Missing required arguments exits with code 2
+    with pytest.raises(SystemExit) as exc:
+        main(["--diagnosis", str(diag_file)])
+    assert exc.value.code == 2
+
+
+
 
 
 
