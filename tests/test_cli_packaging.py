@@ -1,12 +1,13 @@
 """Tests for Stage 1 single-source runtime packaging and runner regressions."""
 
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 import pytest
 
-from flaky_triage import cli, runner
+from flaky_triage import runner
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
@@ -37,19 +38,20 @@ def test_scripts_delegate_to_runtime_single_source():
     _, _, _, lib_dir, _ = runner._locate_paths()
     assert lib_dir == RUNTIME_DIR / "lib"
 
-    res_scripts = subprocess.run(
-        ["bash", str(SCRIPTS_DIR / "detect.sh"), "--help"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    res_runtime = subprocess.run(
-        ["bash", str(RUNTIME_DIR / "detect.sh"), "--help"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert res_scripts.stdout == res_runtime.stdout
+    if os.name != "nt":
+        res_scripts = subprocess.run(
+            ["bash", str(SCRIPTS_DIR / "detect.sh"), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        res_runtime = subprocess.run(
+            ["bash", str(RUNTIME_DIR / "detect.sh"), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert res_scripts.stdout == res_runtime.stdout
 
 
 def test_parse_verbose_log_fallback_supports_spaces_in_test_paths(tmp_path):
@@ -119,7 +121,6 @@ def test_runner_cleans_up_temp_files_on_keyboard_interrupt(tmp_path, monkeypatch
         call_count["n"] += 1
         # Call 1 = collection, Call 2 = repeat 1, Call 3 = isolated run 1
         if call_count["n"] == 3:
-            # Verify transient files exist right before KeyboardInterrupt
             assert (out_dir / ".tmp_run_2").is_dir()
             assert (out_dir / "orders" / "single.txt").is_file()
             assert (out_dir / "orders" / "smart_isolated.txt").is_file()
@@ -163,32 +164,33 @@ def test_detect_sh_and_runner_smart_isolated_run_counts(tmp_path, capsys):
         encoding="utf-8",
     )
 
-    out_sh = tmp_path / "out_sh"
-    res = subprocess.run(
-        [
-            "bash",
-            str(SCRIPTS_DIR / "detect.sh"),
-            "--project", str(proj),
-            "--out", str(out_sh),
-            "--repeats", "2",
-            "--hash-seeds", "",
-            "--orders", "0",
-            "--timezones", "",
-            "--isolated", "1",
-            "--isolated-scope", "smart",
-            "--no-report",
-            "--python", sys.executable,
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert (
-        "collected 3 tests; planned up to 5 runs (2 suite runs + smart isolated for failing tests; timeout 60s each)"
-        in res.stderr
-    )
-    assert "isolated: 1 runs done" in res.stderr
-    assert "finished 3 runs in " in res.stderr
+    if os.name != "nt":
+        out_sh = tmp_path / "out_sh"
+        res = subprocess.run(
+            [
+                "bash",
+                str(SCRIPTS_DIR / "detect.sh"),
+                "--project", str(proj),
+                "--out", str(out_sh),
+                "--repeats", "2",
+                "--hash-seeds", "",
+                "--orders", "0",
+                "--timezones", "",
+                "--isolated", "1",
+                "--isolated-scope", "smart",
+                "--no-report",
+                "--python", sys.executable,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert (
+            "collected 3 tests; planned up to 5 runs (2 suite runs + smart isolated for failing tests; timeout 60s each)"
+            in res.stderr
+        )
+        assert "isolated: 1 runs done" in res.stderr
+        assert "finished 3 runs in " in res.stderr
 
     out_py = tmp_path / "out_py"
     rc = runner.run_detect(
@@ -220,7 +222,11 @@ def test_run_demo_fallback_path_matches_demo_sh(tmp_path, monkeypatch):
     fake_cwd = tmp_path / "empty_cwd"
     fake_cwd.mkdir()
     monkeypatch.chdir(fake_cwd)
-    monkeypatch.setenv("FLAKY_INSTALLED_PACKAGE", "1")
+    monkeypatch.setattr(
+        runner,
+        "_locate_paths",
+        lambda: (RUNTIME_DIR.parent, REPO_ROOT, REPO_ROOT, RUNTIME_DIR / "lib", True),
+    )
 
     called = {}
 

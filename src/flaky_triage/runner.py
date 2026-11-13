@@ -68,12 +68,10 @@ def _locate_paths():
     pkg_dir = Path(__file__).resolve().parent
     repo_root = pkg_dir.parents[1]
     lib_dir = pkg_dir / "runtime" / "lib"
-    if (repo_root / "scripts" / "detect.sh").is_file():
-        tool_root = repo_root
-        installed = os.environ.get("FLAKY_INSTALLED_PACKAGE") == "1"
-    else:
-        tool_root = pkg_dir
-        installed = True
+    installed = os.environ.get("FLAKY_INSTALLED_PACKAGE") == "1" or not (
+        repo_root / "scripts" / "detect.sh"
+    ).is_file()
+    tool_root = pkg_dir if installed else repo_root
     return pkg_dir, repo_root, tool_root, lib_dir, installed
 
 

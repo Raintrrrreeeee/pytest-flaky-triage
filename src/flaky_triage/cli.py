@@ -37,9 +37,7 @@ def main(argv=None):
 
     env = os.environ.copy()
     script_dir = pkg_dir / "runtime"
-    if is_repo_checkout:
-        env.setdefault("FLAKY_TOOL_ROOT", str(repo_root))
-    else:
+    if not is_repo_checkout:
         env["FLAKY_INSTALLED_PACKAGE"] = "1"
 
     if args and args[0] == "--demo":

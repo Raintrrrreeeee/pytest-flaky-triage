@@ -14,9 +14,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-if [[ -n ${FLAKY_TOOL_ROOT:-} && -d ${FLAKY_TOOL_ROOT:-} ]]; then
-    TOOL_ROOT=$(cd -P "$FLAKY_TOOL_ROOT" && pwd -P)
-elif [[ ${FLAKY_INSTALLED_PACKAGE:-0} != 1 && -d $SCRIPT_DIR/../../../src/flaky_triage && -d $SCRIPT_DIR/../../../scripts ]]; then
+if [[ ${FLAKY_INSTALLED_PACKAGE:-0} != 1 && -d $SCRIPT_DIR/../../../src/flaky_triage && -d $SCRIPT_DIR/../../../scripts ]]; then
     TOOL_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd -P)
 else
     TOOL_ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd -P)
@@ -109,6 +107,7 @@ is_tz() {
 
 # ---------------------------------------------------------------- arguments
 
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help) usage; exit 0 ;;
@@ -226,7 +225,7 @@ fi
 if [[ ${OSTYPE:-} == msys* || ${OSTYPE:-} == cygwin* || ${OS:-} == Windows_NT ]]; then
     FLAKY_PURE_PYTHON=1 FLAKY_CLI_NAME="${FLAKY_CLI_NAME:-scripts/detect.sh}" \
         PYTHONPATH="$TOOL_ROOT/src${PYTHONPATH:+;$PYTHONPATH}" \
-        exec "$TOOL_PYTHON" -m flaky_triage.cli "$@"
+        exec "$TOOL_PYTHON" -m flaky_triage.cli ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
 fi
 
 TOOL_PYTHONPATH="$TOOL_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"

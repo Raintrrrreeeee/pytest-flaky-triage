@@ -11,9 +11,7 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-if [[ -n ${FLAKY_TOOL_ROOT:-} && -d ${FLAKY_TOOL_ROOT:-} ]]; then
-    TOOL_ROOT=$(cd -P "$FLAKY_TOOL_ROOT" && pwd -P)
-elif [[ ${FLAKY_INSTALLED_PACKAGE:-0} != 1 && -d $SCRIPT_DIR/../../../src/flaky_triage && -d $SCRIPT_DIR/../../../scripts ]]; then
+if [[ ${FLAKY_INSTALLED_PACKAGE:-0} != 1 && -d $SCRIPT_DIR/../../../src/flaky_triage && -d $SCRIPT_DIR/../../../scripts ]]; then
     TOOL_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd -P)
 else
     TOOL_ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd -P)
