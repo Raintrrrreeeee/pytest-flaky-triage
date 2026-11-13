@@ -35,8 +35,20 @@ _RANK = {
 
 _SUMMARY_SEC_RE = re.compile(r"^=+ .* in ([0-9]+\.[0-9]+)s.*=+$")
 _VERBOSE_OUTCOME_RE = re.compile(
-    r"^(\S+::.*?) (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+\[.*\])?\s*$"
+    r"^(.+?::.+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+.*)?$"
 )
+_END_RESULTS_BANNER_RE = re.compile(
+    r"^=+ (?:FAILURES|ERRORS|warnings summary|short test summary info|"
+    r"slowest .* durations|[0-9]+ (?:passed|failed|error|skipped|xfailed|xpassed|warnings?|deselected).* in [0-9.]+s.*) =+$"
+)
+_STATUS_TO_OUTCOME = {
+    "PASSED": "passed",
+    "FAILED": "failed",
+    "ERROR": "error",
+    "SKIPPED": "skipped",
+    "XFAIL": "xfailed",
+    "XPASS": "xpassed",
+}
 
 
 def _is_uint(val):
@@ -55,12 +67,11 @@ def _csv_quote(text):
 def _locate_paths():
     pkg_dir = Path(__file__).resolve().parent
     repo_root = pkg_dir.parents[1]
-    if (repo_root / "scripts" / "lib" / "flaky_plugin.py").is_file():
-        lib_dir = repo_root / "scripts" / "lib"
+    lib_dir = pkg_dir / "runtime" / "lib"
+    if (repo_root / "scripts" / "detect.sh").is_file():
         tool_root = repo_root
         installed = os.environ.get("FLAKY_INSTALLED_PACKAGE") == "1"
     else:
-        lib_dir = pkg_dir / "runtime" / "lib"
         tool_root = pkg_dir
         installed = True
     return pkg_dir, repo_root, tool_root, lib_dir, installed
@@ -95,6 +106,71 @@ Options:
   --no-report                stop after writing results.csv
   -h, --help                 show this help
 """
+
+
+def _parse_verbose_log_fallback(log_source, expected_ids=None):
+    """Parse verbose pytest log lines into (outcomes, positions), matching parse_log.awk."""
+    if isinstance(log_source, Path):
+        try:
+            lines = log_source.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+    elif isinstance(log_source, str):
+        lines = log_source.splitlines()
+    else:
+        lines = list(log_source)
+
+    expected_set = set(expected_ids) if expected_ids is not None else None
+    outcomes = {}
+    positions = {}
+    n_reported = 0
+
+    for raw_line in lines:
+        line = raw_line.rstrip("\r\n")
+        if not line:
+            continue
+        if _END_RESULTS_BANNER_RE.match(line.strip()):
+            break
+
+        matched_nid = None
+        matched_out = None
+
+        if expected_set is not None:
+            for status_word, mapped_out in _STATUS_TO_OUTCOME.items():
+                token = f" {status_word}"
+                start_idx = 0
+                while True:
+                    pos = line.find(token, start_idx)
+                    if pos == -1:
+                        break
+                    end_pos = pos + len(token)
+                    after = line[end_pos : end_pos + 1]
+                    candidate = line[:pos].strip()
+                    if after in ("", " ") and candidate in expected_set:
+                        matched_nid = candidate
+                        matched_out = mapped_out
+                        break
+                    start_idx = pos + 1
+                if matched_nid is not None:
+                    break
+
+        if matched_nid is None:
+            m = _VERBOSE_OUTCOME_RE.match(line.strip())
+            if m:
+                cand, raw_tok = m.group(1).strip(), m.group(2)
+                if expected_set is None or cand in expected_set:
+                    matched_nid = cand
+                    matched_out = _STATUS_TO_OUTCOME[raw_tok]
+
+        if matched_nid is not None and matched_out is not None:
+            if matched_nid not in outcomes:
+                outcomes[matched_nid] = matched_out
+                n_reported += 1
+                positions[matched_nid] = n_reported
+            elif _RANK[matched_out] > _RANK[outcomes[matched_nid]]:
+                outcomes[matched_nid] = matched_out
+
+    return outcomes, positions
 
 
 def _events_or_log_to_rows(run_id, condition, cvalue, timed_out, expected_ids, events_file, log_file):
@@ -139,31 +215,7 @@ def _events_or_log_to_rows(run_id, condition, cvalue, timed_out, expected_ids, e
             pass
 
     if not any_event and log_file.is_file():
-        map_out = {
-            "PASSED": "passed",
-            "FAILED": "failed",
-            "ERROR": "error",
-            "SKIPPED": "skipped",
-            "XFAIL": "xfailed",
-            "XPASS": "xpassed",
-        }
-        try:
-            for raw_line in log_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                m = _VERBOSE_OUTCOME_RE.match(raw_line.strip())
-                if not m:
-                    continue
-                nid, raw_tok = m.group(1), m.group(2)
-                if nid not in expected_set:
-                    continue
-                out = map_out[raw_tok]
-                if nid not in outcomes:
-                    outcomes[nid] = out
-                    n_reported += 1
-                    positions[nid] = n_reported
-                elif _RANK[out] > _RANK[outcomes[nid]]:
-                    outcomes[nid] = out
-        except OSError:
-            pass
+        outcomes, positions = _parse_verbose_log_fallback(log_file, expected_set)
 
     teardown_timeout_id = None
     if timed_out and any_event:
@@ -192,6 +244,38 @@ def _events_or_log_to_rows(run_id, condition, cvalue, timed_out, expected_ids, e
     return rows, n_parsed
 
 
+def _kill_proc_tree(proc, is_win):
+    if is_win:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except OSError:
+            pass
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    else:
+        import signal
+
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def _run_subprocess_with_timeout(cmd, cwd, env, timeout_secs, log_file):
     is_win = os.name == "nt"
     with log_file.open("w", encoding="utf-8", errors="replace") as log_handle:
@@ -211,36 +295,11 @@ def _run_subprocess_with_timeout(cmd, cwd, env, timeout_secs, log_file):
             rc = proc.wait(timeout=timeout_secs)
             return (128 + (-rc)) if rc < 0 else rc
         except subprocess.TimeoutExpired:
-            if is_win:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                    )
-                except OSError:
-                    pass
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-            else:
-                import signal
-
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    try:
-                        proc.wait(timeout=2.0)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            try:
-                proc.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                pass
+            _kill_proc_tree(proc, is_win)
             return 124
+        except BaseException:
+            _kill_proc_tree(proc, is_win)
+            raise
 
 
 def _find_target_python(explicit_python, project_dir, tool_python):
@@ -585,7 +644,16 @@ def run_detect(argv=None):
 
     collect_log = out_dir / "collect.log"
     collect_tmp = out_dir / "collected.tmp"
+    single_file = out_dir / "orders" / "single.txt"
+    smart_iso_file = out_dir / "orders" / "smart_isolated.txt"
     collect_tmp.unlink(missing_ok=True)
+
+    def _cleanup_transient_files():
+        collect_tmp.unlink(missing_ok=True)
+        single_file.unlink(missing_ok=True)
+        smart_iso_file.unlink(missing_ok=True)
+        for stale_tmp in out_dir.glob(".tmp_run_*"):
+            shutil.rmtree(stale_tmp, ignore_errors=True)
 
     c_env = os.environ.copy()
     c_env.pop("PYTEST_ADDOPTS", None)
@@ -597,233 +665,248 @@ def run_detect(argv=None):
     c_env["PYTHONPATH"] = target_pythonpath
     c_env["FLAKY_COLLECT_FILE"] = str(collect_tmp)
 
-    collect_rc = _run_subprocess_with_timeout(
-        [target_python, "-m", "pytest", *pytest_opts, "--collect-only", "--verbosity=-1", *extra_collect_args],
-        cwd=project_dir,
-        env=c_env,
-        timeout_secs=timeout_secs,
-        log_file=collect_log,
-    )
-
-    if collect_rc == 5:
-        collect_tmp.unlink(missing_ok=True)
-        if (project_dir / "scenario" / "tests").is_dir():
-            say(f"hint: found benchmark suite at '{project_dir / 'scenario'}' — try: --project {project_dir / 'scenario'}")
-        return die(f"pytest found no tests in {project_dir}", E_COLLECT)
-    if collect_rc == 124:
-        collect_tmp.unlink(missing_ok=True)
-        return die(f"pytest collection timed out after {timeout_secs}s in {project_dir}", E_COLLECT)
-    if collect_rc != 0:
-        collect_tmp.unlink(missing_ok=True)
-        try:
-            tail_lines = collect_log.read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
-            for ln in tail_lines:
-                sys.stderr.write(ln + "\n")
-        except OSError:
-            pass
-        if (project_dir / "scenario" / "tests").is_dir():
-            say(f"hint: found benchmark suite at '{project_dir / 'scenario'}' — try: --project {project_dir / 'scenario'}")
-        return die(
-            f"pytest could not collect the project (exit code {collect_rc}); full output in {out_rel}/collect.log",
-            E_COLLECT,
+    try:
+        collect_rc = _run_subprocess_with_timeout(
+            [target_python, "-m", "pytest", *pytest_opts, "--collect-only", "--verbosity=-1", *extra_collect_args],
+            cwd=project_dir,
+            env=c_env,
+            timeout_secs=timeout_secs,
+            log_file=collect_log,
         )
 
-    collected_ids = []
-    if collect_tmp.is_file():
-        collected_ids = [
-            ln.strip()
-            for ln in collect_tmp.read_text(encoding="utf-8", errors="replace").splitlines()
-            if ln.strip()
-        ]
-    if not collected_ids and collect_log.is_file():
-        for ln in collect_log.read_text(encoding="utf-8", errors="replace").splitlines():
-            s = ln.strip()
-            if s.startswith("="):
-                continue
-            if not s:
-                break
-            if "::" in s:
-                collected_ids.append(s)
-    collect_tmp.unlink(missing_ok=True)
+        if collect_rc == 5:
+            collect_tmp.unlink(missing_ok=True)
+            if (project_dir / "scenario" / "tests").is_dir():
+                say(f"hint: found benchmark suite at '{project_dir / 'scenario'}' — try: --project {project_dir / 'scenario'}")
+            return die(f"pytest found no tests in {project_dir}", E_COLLECT)
+        if collect_rc == 124:
+            collect_tmp.unlink(missing_ok=True)
+            return die(f"pytest collection timed out after {timeout_secs}s in {project_dir}", E_COLLECT)
+        if collect_rc != 0:
+            collect_tmp.unlink(missing_ok=True)
+            try:
+                tail_lines = collect_log.read_text(encoding="utf-8", errors="replace").splitlines()[-15:]
+                for ln in tail_lines:
+                    sys.stderr.write(ln + "\n")
+            except OSError:
+                pass
+            if (project_dir / "scenario" / "tests").is_dir():
+                say(f"hint: found benchmark suite at '{project_dir / 'scenario'}' — try: --project {project_dir / 'scenario'}")
+            return die(
+                f"pytest could not collect the project (exit code {collect_rc}); full output in {out_rel}/collect.log",
+                E_COLLECT,
+            )
 
-    if not collected_ids:
-        return die(f"could not read any test IDs from {out_rel}/collect.log", E_COLLECT)
+        collected_ids = []
+        if collect_tmp.is_file():
+            collected_ids = [
+                ln.strip()
+                for ln in collect_tmp.read_text(encoding="utf-8", errors="replace").splitlines()
+                if ln.strip()
+            ]
+        if not collected_ids and collect_log.is_file():
+            for ln in collect_log.read_text(encoding="utf-8", errors="replace").splitlines():
+                s = ln.strip()
+                if s.startswith("="):
+                    continue
+                if not s:
+                    if collected_ids:
+                        break
+                    continue
+                if "::" in s:
+                    collected_ids.append(s)
+        collect_tmp.unlink(missing_ok=True)
 
-    shutil.rmtree(out_dir / "logs", ignore_errors=True)
-    shutil.rmtree(out_dir / "orders", ignore_errors=True)
-    for stale in ("results.csv", "run_meta.csv", "diagnosis.json", "report.md"):
-        (out_dir / stale).unlink(missing_ok=True)
-    (out_dir / "logs").mkdir(parents=True, exist_ok=True)
-    (out_dir / "orders").mkdir(parents=True, exist_ok=True)
+        if not collected_ids:
+            return die(f"could not read any test IDs from {out_rel}/collect.log", E_COLLECT)
 
-    collected_file = out_dir / "collected.txt"
-    collected_file.write_text("".join(f"{nid}\n" for nid in collected_ids), encoding="utf-8")
+        shutil.rmtree(out_dir / "logs", ignore_errors=True)
+        shutil.rmtree(out_dir / "orders", ignore_errors=True)
+        for stale in ("results.csv", "run_meta.csv", "diagnosis.json", "report.md"):
+            (out_dir / stale).unlink(missing_ok=True)
+        (out_dir / "logs").mkdir(parents=True, exist_ok=True)
+        (out_dir / "orders").mkdir(parents=True, exist_ok=True)
 
-    n_tests = len(collected_ids)
-    n_seeds = len(seed_arr)
-    n_tzs = len(tz_arr)
-    n_order_runs = (orders + 1) if orders > 0 else 0
-    n_runs = repeats + n_seeds + n_order_runs + n_tzs + n_tests * isolated
-    say(f"collected {n_tests} tests; planned {n_runs} runs (timeout {timeout_secs}s each)")
+        collected_file = out_dir / "collected.txt"
+        collected_file.write_text("".join(f"{nid}\n" for nid in collected_ids), encoding="utf-8")
 
-    results_csv = out_dir / "results.csv"
-    run_meta_csv = out_dir / "run_meta.csv"
-    results_csv.write_text("run_id,condition,condition_value,position,test_id,outcome\n", encoding="utf-8")
-    run_meta_csv.write_text(
-        "run_id,condition,condition_value,hash_seed,exit_code,status,seconds,tests_expected,tests_reported,log_path\n",
-        encoding="utf-8",
-    )
-
-    run_id = 0
-    total_timeouts = 0
-    total_crashes = 0
-    total_parsed = 0
-    start_ts = time.monotonic()
-
-    def run_one(condition, value, hash_seed, expected_list, order_file=None, target_args=None):
-        nonlocal run_id, total_timeouts, total_crashes, total_parsed
-        run_id += 1
-        if is_tty:
-            sys.stderr.write(f"\r[detect] running {run_id}/{n_runs} ({condition} {value})...\033[K")
-            sys.stderr.flush()
-        pad_width = 5 if n_runs >= 1000 else 3
-        log_rel = f"logs/run_{run_id:0{pad_width}d}.log"
-        log_file = out_dir / log_rel
-
-        tmp_run_dir = out_dir / f".tmp_run_{run_id}"
-        tmp_run_dir.mkdir(parents=True, exist_ok=True)
-        events_file = tmp_run_dir / "events.jsonl"
-
-        r_env = os.environ.copy()
-        r_env.pop("PYTEST_ADDOPTS", None)
-        r_env.pop("FLAKY_COLLECT_FILE", None)
-        r_env["PYTHONHASHSEED"] = str(hash_seed)
-        r_env["TZ"] = str(value) if condition == "tz" else "UTC"
-        r_env["PYTHONDONTWRITEBYTECODE"] = "1"
-        r_env["PYTHONPATH"] = target_pythonpath
-        r_env["TMPDIR"] = str(tmp_run_dir)
-        r_env["TEMP"] = str(tmp_run_dir)
-        r_env["TMP"] = str(tmp_run_dir)
-        r_env["FLAKY_EVENTS_FILE"] = str(events_file)
-        if order_file is not None:
-            r_env["FLAKY_ORDER_FILE"] = str(order_file)
-        else:
-            r_env.pop("FLAKY_ORDER_FILE", None)
-
-        cmd = [target_python, "-m", "pytest", *pytest_opts, *(target_args or [])]
-        rc = _run_subprocess_with_timeout(
-            cmd, cwd=project_dir, env=r_env, timeout_secs=timeout_secs, log_file=log_file
-        )
-
-        timed_out = False
-        if rc in (0, 1):
-            status = "ok"
-        elif rc == 124:
-            status = "timeout"
-            timed_out = True
-            total_timeouts += 1
-            say(f"warning: run {run_id} ({condition} {value}) hit the {timeout_secs}s timeout")
-        elif rc == 2:
-            status = "interrupted"
-        elif rc == 3:
-            status = "internal_error"
-        elif rc == 4:
-            status = "usage_error"
-        elif rc == 5:
-            status = "no_tests"
-        else:
-            status = "crashed"
-
-        if status not in ("ok", "timeout"):
-            total_crashes += 1
+        n_tests = len(collected_ids)
+        n_seeds = len(seed_arr)
+        n_tzs = len(tz_arr)
+        n_order_runs = (orders + 1) if orders > 0 else 0
+        base_runs = repeats + n_seeds + n_order_runs + n_tzs
+        n_runs = base_runs + n_tests * isolated
+        if isolated > 0 and isolated_scope == "smart":
             say(
-                f"warning: run {run_id} ({condition} {value}) ended with pytest exit code {rc} ({status}); "
-                f"see {out_rel}/{log_rel}"
+                f"collected {n_tests} tests; planned up to {n_runs} runs "
+                f"({base_runs} suite runs + smart isolated for failing tests; timeout {timeout_secs}s each)"
             )
+        else:
+            say(f"collected {n_tests} tests; planned {n_runs} runs (timeout {timeout_secs}s each)")
 
-        rows, n_parsed = _events_or_log_to_rows(
-            run_id, condition, value, timed_out, expected_list, events_file, log_file
+        results_csv = out_dir / "results.csv"
+        run_meta_csv = out_dir / "run_meta.csv"
+        results_csv.write_text("run_id,condition,condition_value,position,test_id,outcome\n", encoding="utf-8")
+        run_meta_csv.write_text(
+            "run_id,condition,condition_value,hash_seed,exit_code,status,seconds,tests_expected,tests_reported,log_path\n",
+            encoding="utf-8",
         )
-        shutil.rmtree(tmp_run_dir, ignore_errors=True)
 
-        if rows:
-            with results_csv.open("a", encoding="utf-8") as stream:
-                stream.write("\n".join(rows) + "\n")
+        run_id = 0
+        total_timeouts = 0
+        total_crashes = 0
+        total_parsed = 0
+        start_ts = time.monotonic()
 
-        n_expected = len(expected_list)
-        total_parsed += n_parsed
-        if status == "ok" and n_parsed < n_expected:
-            total_crashes += 1
-            say(
-                f"warning: run {run_id} ({condition} {value}) reported only {n_parsed} of {n_expected} tests; "
-                f"see {out_rel}/{log_rel}"
-            )
+        def run_one(condition, value, hash_seed, expected_list, order_file=None, target_args=None):
+            nonlocal run_id, total_timeouts, total_crashes, total_parsed
+            run_id += 1
+            if is_tty:
+                sys.stderr.write(f"\r[detect] running {run_id}/{n_runs} ({condition} {value})...\033[K")
+                sys.stderr.flush()
+            pad_width = 5 if n_runs >= 1000 else 3
+            log_rel = f"logs/run_{run_id:0{pad_width}d}.log"
+            log_file = out_dir / log_rel
 
-        seconds_str = ""
-        try:
-            for ln in reversed(log_file.read_text(encoding="utf-8", errors="replace").splitlines()):
-                m = _SUMMARY_SEC_RE.match(ln.strip())
-                if m:
-                    seconds_str = m.group(1)
-                    break
-        except OSError:
-            pass
+            tmp_run_dir = out_dir / f".tmp_run_{run_id}"
+            tmp_run_dir.mkdir(parents=True, exist_ok=True)
+            events_file = tmp_run_dir / "events.jsonl"
+            try:
+                r_env = os.environ.copy()
+                r_env.pop("PYTEST_ADDOPTS", None)
+                r_env.pop("FLAKY_COLLECT_FILE", None)
+                r_env["PYTHONHASHSEED"] = str(hash_seed)
+                r_env["TZ"] = str(value) if condition == "tz" else "UTC"
+                r_env["PYTHONDONTWRITEBYTECODE"] = "1"
+                r_env["PYTHONPATH"] = target_pythonpath
+                r_env["TMPDIR"] = str(tmp_run_dir)
+                r_env["TEMP"] = str(tmp_run_dir)
+                r_env["TMP"] = str(tmp_run_dir)
+                r_env["FLAKY_EVENTS_FILE"] = str(events_file)
+                if order_file is not None:
+                    r_env["FLAKY_ORDER_FILE"] = str(order_file)
+                else:
+                    r_env.pop("FLAKY_ORDER_FILE", None)
 
-        with run_meta_csv.open("a", encoding="utf-8") as mstream:
-            mstream.write(
-                f"{run_id},{condition},{_csv_quote(value)},{hash_seed},{rc},{status},"
-                f"{seconds_str},{n_expected},{n_parsed},{log_rel}\n"
-            )
+                cmd = [target_python, "-m", "pytest", *pytest_opts, *(target_args or [])]
+                rc = _run_subprocess_with_timeout(
+                    cmd, cwd=project_dir, env=r_env, timeout_secs=timeout_secs, log_file=log_file
+                )
 
-    for r in range(1, repeats + 1):
-        run_one("repeat", str(r), 0, collected_ids, collected_file, extra_collect_args)
-    say(f"repeat:   {repeats} runs done")
+                timed_out = False
+                if rc in (0, 1):
+                    status = "ok"
+                elif rc == 124:
+                    status = "timeout"
+                    timed_out = True
+                    total_timeouts += 1
+                    say(f"warning: run {run_id} ({condition} {value}) hit the {timeout_secs}s timeout")
+                elif rc == 2:
+                    status = "interrupted"
+                elif rc == 3:
+                    status = "internal_error"
+                elif rc == 4:
+                    status = "usage_error"
+                elif rc == 5:
+                    status = "no_tests"
+                else:
+                    status = "crashed"
 
-    for seed in seed_arr:
-        run_one("hashseed", str(seed), seed, collected_ids, collected_file, extra_collect_args)
-    say(f"hashseed: {n_seeds} runs done")
+                if status not in ("ok", "timeout"):
+                    total_crashes += 1
+                    say(
+                        f"warning: run {run_id} ({condition} {value}) ended with pytest exit code {rc} ({status}); "
+                        f"see {out_rel}/{log_rel}"
+                    )
 
-    if orders > 0:
-        rev_ids = list(reversed(collected_ids))
-        rev_file = out_dir / "orders" / "reverse.txt"
-        rev_file.write_text("".join(f"{nid}\n" for nid in rev_ids), encoding="utf-8")
-        run_one("order", "reverse", 0, rev_ids, rev_file, extra_collect_args)
+                rows, n_parsed = _events_or_log_to_rows(
+                    run_id, condition, value, timed_out, expected_list, events_file, log_file
+                )
+            finally:
+                shutil.rmtree(tmp_run_dir, ignore_errors=True)
 
-        for k in range(1, orders + 1):
-            shuf_ids = list(collected_ids)
-            rng = random.Random(k)
-            rng.shuffle(shuf_ids)
-            shuf_file = out_dir / "orders" / f"shuffle_{k}.txt"
-            shuf_file.write_text("".join(f"{nid}\n" for nid in shuf_ids), encoding="utf-8")
-            run_one("order", f"shuffle:{k}", 0, shuf_ids, shuf_file, extra_collect_args)
-        say(f"order:    {n_order_runs} runs done")
+            if rows:
+                with results_csv.open("a", encoding="utf-8") as stream:
+                    stream.write("\n".join(rows) + "\n")
 
-    if n_tzs > 0:
-        for tz_val in tz_arr:
-            run_one("tz", tz_val, 0, collected_ids, collected_file, extra_collect_args)
-        say(f"tz:       {n_tzs} runs done")
+            n_expected = len(expected_list)
+            total_parsed += n_parsed
+            if status == "ok" and n_parsed < n_expected:
+                total_crashes += 1
+                say(
+                    f"warning: run {run_id} ({condition} {value}) reported only {n_parsed} of {n_expected} tests; "
+                    f"see {out_rel}/{log_rel}"
+                )
 
-    if isolated > 0:
-        single_file = out_dir / "orders" / "single.txt"
-        iso_list = list(collected_ids)
-        if isolated_scope == "smart":
-            failed_set = set()
-            with results_csv.open(encoding="utf-8") as rstream:
-                reader = csv.DictReader(rstream)
-                for row in reader:
-                    if row["condition"] != "tz" and row["outcome"] not in ("passed", "skipped"):
-                        failed_set.add(row["test_id"])
-            iso_list = [nid for nid in collected_ids if nid in failed_set]
-        iso_count = 0
-        for test_id in iso_list:
-            single_file.write_text(f"{test_id}\n", encoding="utf-8")
-            test_file = test_id.split("::", 1)[0]
-            target_arg = test_file if (project_dir / test_file).is_file() else test_id
-            for _ in range(isolated):
-                run_one("isolated", "alone", 0, [test_id], single_file, [target_arg])
-                iso_count += 1
-        single_file.unlink(missing_ok=True)
-        say(f"isolated: {iso_count} runs done")
+            seconds_str = ""
+            try:
+                for ln in reversed(log_file.read_text(encoding="utf-8", errors="replace").splitlines()):
+                    m = _SUMMARY_SEC_RE.match(ln.strip())
+                    if m:
+                        seconds_str = m.group(1)
+                        break
+            except OSError:
+                pass
+
+            with run_meta_csv.open("a", encoding="utf-8") as mstream:
+                mstream.write(
+                    f"{run_id},{condition},{_csv_quote(value)},{hash_seed},{rc},{status},"
+                    f"{seconds_str},{n_expected},{n_parsed},{log_rel}\n"
+                )
+
+        for r in range(1, repeats + 1):
+            run_one("repeat", str(r), 0, collected_ids, collected_file, extra_collect_args)
+        say(f"repeat:   {repeats} runs done")
+
+        for seed in seed_arr:
+            run_one("hashseed", str(seed), seed, collected_ids, collected_file, extra_collect_args)
+        say(f"hashseed: {n_seeds} runs done")
+
+        if orders > 0:
+            rev_ids = list(reversed(collected_ids))
+            rev_file = out_dir / "orders" / "reverse.txt"
+            rev_file.write_text("".join(f"{nid}\n" for nid in rev_ids), encoding="utf-8")
+            run_one("order", "reverse", 0, rev_ids, rev_file, extra_collect_args)
+
+            for k in range(1, orders + 1):
+                shuf_ids = list(collected_ids)
+                rng = random.Random(k)
+                rng.shuffle(shuf_ids)
+                shuf_file = out_dir / "orders" / f"shuffle_{k}.txt"
+                shuf_file.write_text("".join(f"{nid}\n" for nid in shuf_ids), encoding="utf-8")
+                run_one("order", f"shuffle:{k}", 0, shuf_ids, shuf_file, extra_collect_args)
+            say(f"order:    {n_order_runs} runs done")
+
+        if n_tzs > 0:
+            for tz_val in tz_arr:
+                run_one("tz", tz_val, 0, collected_ids, collected_file, extra_collect_args)
+            say(f"tz:       {n_tzs} runs done")
+
+        if isolated > 0:
+            iso_list = list(collected_ids)
+            if isolated_scope == "smart":
+                failed_set = set()
+                with results_csv.open(encoding="utf-8") as rstream:
+                    reader = csv.DictReader(rstream)
+                    for row in reader:
+                        if row["condition"] != "tz" and row["outcome"] not in ("passed", "skipped"):
+                            failed_set.add(row["test_id"])
+                iso_list = [nid for nid in collected_ids if nid in failed_set]
+                smart_iso_file.write_text("".join(f"{nid}\n" for nid in iso_list), encoding="utf-8")
+                n_runs = base_runs + len(iso_list) * isolated
+            iso_count = 0
+            for test_id in iso_list:
+                single_file.write_text(f"{test_id}\n", encoding="utf-8")
+                test_file = test_id.split("::", 1)[0]
+                target_arg = test_file if (project_dir / test_file).is_file() else test_id
+                for _ in range(isolated):
+                    run_one("isolated", "alone", 0, [test_id], single_file, [target_arg])
+                    iso_count += 1
+            single_file.unlink(missing_ok=True)
+            smart_iso_file.unlink(missing_ok=True)
+            say(f"isolated: {iso_count} runs done")
+    finally:
+        _cleanup_transient_files()
 
     elapsed = int(time.monotonic() - start_ts)
     raw_lines = 0
@@ -875,9 +958,9 @@ def run_demo(argv=None):
         answer_key = cwd.parent / "docs" / "scenario.md"
         out_dir = cwd / "out"
     else:
-        scenario = cwd / "scenario"
-        answer_key = cwd / "docs" / "scenario.md"
-        out_dir = cwd / "out"
+        scenario = tool_root / "scenario"
+        answer_key = tool_root / "docs" / "scenario.md"
+        out_dir = tool_root / "out"
 
     python_bin = os.environ.get("FLAKY_TOOL_PYTHON") or sys.executable
 

@@ -26,7 +26,8 @@ def main(argv=None):
     os.environ.setdefault("FLAKY_TOOL_PYTHON", sys.executable)
     os.environ.setdefault("FLAKY_CLI_NAME", "pytest-flaky-triage")
 
-    if not (repo_root / "scripts" / "detect.sh").is_file():
+    is_repo_checkout = (repo_root / "scripts" / "detect.sh").is_file()
+    if not is_repo_checkout:
         os.environ["FLAKY_INSTALLED_PACKAGE"] = "1"
 
     if _use_pure_python_runner():
@@ -35,11 +36,11 @@ def main(argv=None):
         return runner.run_detect(args)
 
     env = os.environ.copy()
-    if (repo_root / "scripts" / "detect.sh").is_file():
-        script_dir = repo_root / "scripts"
+    script_dir = pkg_dir / "runtime"
+    if is_repo_checkout:
+        env.setdefault("FLAKY_TOOL_ROOT", str(repo_root))
     else:
         env["FLAKY_INSTALLED_PACKAGE"] = "1"
-        script_dir = pkg_dir / "runtime"
 
     if args and args[0] == "--demo":
         script = script_dir / "demo.sh"

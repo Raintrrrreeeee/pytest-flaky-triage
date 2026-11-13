@@ -14,7 +14,13 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
-TOOL_ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd -P)
+if [[ -n ${FLAKY_TOOL_ROOT:-} && -d ${FLAKY_TOOL_ROOT:-} ]]; then
+    TOOL_ROOT=$(cd -P "$FLAKY_TOOL_ROOT" && pwd -P)
+elif [[ ${FLAKY_INSTALLED_PACKAGE:-0} != 1 && -d $SCRIPT_DIR/../../../src/flaky_triage && -d $SCRIPT_DIR/../../../scripts ]]; then
+    TOOL_ROOT=$(cd -P "$SCRIPT_DIR/../../.." && pwd -P)
+else
+    TOOL_ROOT=$(cd -P "$SCRIPT_DIR/.." && pwd -P)
+fi
 if [[ -d $SCRIPT_DIR/lib ]]; then
     LIB_DIR="$SCRIPT_DIR/lib"
 else
@@ -299,7 +305,7 @@ CURRENT_RUN_TMP=""
 cleanup_on_signal() {
     local code=$1
     [[ -n $CURRENT_RUN_TMP && -d $CURRENT_RUN_TMP ]] && rm -rf "$CURRENT_RUN_TMP"
-    rm -f "$OUT_DIR/orders/single.txt" "$OUT_DIR/collected.tmp"
+    rm -f "$OUT_DIR/orders/single.txt" "$OUT_DIR/orders/smart_isolated.txt" "$OUT_DIR/collected.tmp"
     echo "" >&2
     say "aborted by signal (exit $code)"
     exit "$code"
@@ -499,7 +505,7 @@ case $collect_rc in
 esac
 
 if [[ ! -s $COLLECT_TMP ]]; then
-    awk '/^=+ / { next } /^$/ { exit } /::/ { sub(/\r$/, ""); print }' "$COLLECT_LOG" > "$COLLECT_TMP"
+    awk '/^=+ / { next } /^$/ { if (found) exit; next } /::/ { sub(/\r$/, ""); found=1; print }' "$COLLECT_LOG" > "$COLLECT_TMP"
 fi
 N_TESTS=$(grep -c . "$COLLECT_TMP" || true)
 [[ $N_TESTS -gt 0 ]] || { rm -f "$COLLECT_TMP"; die "could not read any test IDs from $OUT_REL/collect.log" "$E_COLLECT"; }
@@ -513,8 +519,13 @@ N_SEEDS=${#SEED_ARR[@]}
 N_TZS=${#TZ_ARR[@]}
 N_ORDER_RUNS=0
 [[ $ORDERS -gt 0 ]] && N_ORDER_RUNS=$((ORDERS + 1))
-N_RUNS=$((REPEATS + N_SEEDS + N_ORDER_RUNS + N_TZS + N_TESTS * ISOLATED))
-say "collected $N_TESTS tests; planned $N_RUNS runs (timeout ${TIMEOUT}s each)"
+BASE_RUNS=$((REPEATS + N_SEEDS + N_ORDER_RUNS + N_TZS))
+N_RUNS=$((BASE_RUNS + N_TESTS * ISOLATED))
+if [[ $ISOLATED -gt 0 && $ISOLATED_SCOPE == smart ]]; then
+    say "collected $N_TESTS tests; planned up to $N_RUNS runs ($BASE_RUNS suite runs + smart isolated for failing tests; timeout ${TIMEOUT}s each)"
+else
+    say "collected $N_TESTS tests; planned $N_RUNS runs (timeout ${TIMEOUT}s each)"
+fi
 
 echo 'run_id,condition,condition_value,position,test_id,outcome' > "$OUT_DIR/results.csv"
 echo 'run_id,condition,condition_value,hash_seed,exit_code,status,seconds,tests_expected,tests_reported,log_path' > "$OUT_DIR/run_meta.csv"
@@ -574,6 +585,8 @@ if [[ $ISOLATED -gt 0 ]]; then
                 for (k in failed) print k
             }
         ' "$OUT_DIR/results.csv" > "$iso_candidates"
+        N_ISO_CANDIDATES=$(grep -c . "$iso_candidates" || true)
+        N_RUNS=$((BASE_RUNS + N_ISO_CANDIDATES * ISOLATED))
     fi
     iso_count=0
     while IFS= read -r test_id; do
