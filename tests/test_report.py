@@ -2192,8 +2192,46 @@ def test_render_markdown_and_generate_report_do_not_mutate_input(tmp_path):
     assert "unseeded_randomness" in md
 
 
+def test_modular_heuristics_facade_and_ast_cache_invalidation(tmp_path):
+    """Verify submodule exports match heuristics facade and _parse_file invalidates cache on file edit."""
+    from report.ast_utils import _parse_file as parse_direct
+    from report.disambiguator import disambiguate_causes as disambiguate_direct
+    from report.heuristics import (
+        _parse_file as parse_facade,
+        _scan_function_signals as scan_facade,
+        disambiguate_causes as disambiguate_facade,
+        inspect_test_source as inspect_facade,
+    )
+    from report.inspector import inspect_test_source as inspect_direct
+    from report.signals import _scan_function_signals as scan_direct
 
+    assert inspect_facade is inspect_direct
+    assert disambiguate_facade is disambiguate_direct
+    assert parse_facade is parse_direct
+    assert scan_facade is scan_direct
 
+    test_file = tmp_path / "test_cache_mod.py"
+    test_file.write_text(
+        "import random\n\n"
+        "def test_dynamic():\n"
+        "    assert random.randint(1, 10) > 0\n",
+        encoding="utf-8",
+    )
+    first_info = inspect_facade("test_cache_mod.py::test_dynamic", project_dir=tmp_path)
+    assert len(first_info["indicators"]["unseeded_randomness"]) == 1
+    assert first_info["indicators"]["timezone_sensitivity"] == []
+
+    # Modify the file in-place so size/mtime fingerprint changes; cache must auto-invalidate
+    test_file.write_text(
+        "from datetime import datetime\n\n"
+        "def test_dynamic():\n"
+        "    now = datetime.now()\n"
+        "    assert now is not None\n",
+        encoding="utf-8",
+    )
+    second_info = inspect_facade("test_cache_mod.py::test_dynamic", project_dir=tmp_path)
+    assert second_info["indicators"]["unseeded_randomness"] == []
+    assert len(second_info["indicators"]["timezone_sensitivity"]) == 1
 
 
 
