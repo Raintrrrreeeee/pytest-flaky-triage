@@ -14,6 +14,11 @@ from functools import lru_cache
 from pathlib import Path
 import re
 
+
+# ============================================================================
+# SECTION 1: AST Loader, Caching & Module Resolution
+# ============================================================================
+
 MAX_CALL_DEPTH = 3
 
 RANDOM_MODULES = {"random", "secrets"}
@@ -40,6 +45,8 @@ CACHE_DECORATORS = {"lru_cache", "cache"}
 SETUP_METHODS = {
     "setup_method", "teardown_method", "setup_class", "teardown_class", "setUp", "tearDown",
 }
+ATTR_INIT_METHODS = SETUP_METHODS | {"__init__"}
+TEARDOWN_METHODS = {"teardown_method", "teardown_class", "tearDown"}
 TMP_FIXTURE_NAMES = {"tmp_path", "tmp_path_factory", "tmpdir", "tmpdir_factory"}
 TEMPFILE_SAFE_MODULES = {"tempfile"}
 TEMPFILE_SAFE_CALLS = {
@@ -173,6 +180,15 @@ def _find_enclosing_class(tree, node_parts):
     return scope if isinstance(scope, ast.ClassDef) else None
 
 
+def _extract_assign_targets_and_value(node):
+    """Return (targets_list, value_node) for ast.Assign or ast.AnnAssign with a value, else ([], None)."""
+    if isinstance(node, ast.Assign):
+        return list(node.targets), node.value
+    if isinstance(node, ast.AnnAssign) and node.value is not None:
+        return [node.target], node.value
+    return [], None
+
+
 def _collect_imports_and_globals(tree, project_dir, current_file=None):
     """Return (imported_symbols, module_globals) for a parsed module AST.
 
@@ -210,19 +226,15 @@ def _collect_imports_and_globals(tree, project_dir, current_file=None):
                     imported[local] = (sub_file, alias.name, sub_mod)
                 else:
                     imported[local] = (mod_file, alias.name, mod_name)
-        elif isinstance(node, ast.Assign):
-            call_name = _call_head_name(node.value)
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    if isinstance(node.value, (ast.Constant, ast.Tuple)) and target.id not in mutated_via_global:
-                        continue
-                    globals_map[target.id] = (node.lineno, call_name)
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            call_name = _call_head_name(node.value)
-            if isinstance(node.target, ast.Name):
-                if isinstance(node.value, (ast.Constant, ast.Tuple)) and node.target.id not in mutated_via_global:
-                    continue
-                globals_map[node.target.id] = (node.lineno, call_name)
+        else:
+            targets, val = _extract_assign_targets_and_value(node)
+            if targets and val is not None:
+                call_name = _call_head_name(val)
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        if isinstance(val, (ast.Constant, ast.Tuple)) and target.id not in mutated_via_global:
+                            continue
+                        globals_map[target.id] = (node.lineno, call_name)
     return imported, globals_map
 
 
@@ -356,10 +368,31 @@ def _find_top_def(tree, symbol_name):
     return None
 
 
-def _find_method_in_class(class_node, method_name):
-    for node in getattr(class_node, "body", []):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name:
-            return node
+def _iter_class_hierarchy(class_node, tree=None):
+    """Yield `class_node` followed by any same-file base ClassDef nodes in MRO-like breadth-first order."""
+    if not isinstance(class_node, ast.ClassDef):
+        return
+    queue = deque([class_node])
+    seen = {class_node.name}
+    while queue:
+        cur = queue.popleft()
+        yield cur
+        if tree is None:
+            continue
+        for base in getattr(cur, "bases", []):
+            base_name = base.id if isinstance(base, ast.Name) else None
+            if base_name and base_name not in seen:
+                base_def = _find_top_def(tree, base_name)
+                if isinstance(base_def, ast.ClassDef):
+                    seen.add(base_name)
+                    queue.append(base_def)
+
+
+def _find_method_in_class(class_node, method_name, tree=None):
+    for cls in _iter_class_hierarchy(class_node, tree=tree):
+        for node in getattr(cls, "body", []):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == method_name:
+                return node
     return None
 
 
@@ -371,6 +404,11 @@ def _dedup_preserve_order(items):
             seen.add(item)
             result.append(item)
     return result
+
+
+# ============================================================================
+# SECTION 2: Function Signal Scanners
+# ============================================================================
 
 
 def _is_worker_spawn_call(call_node, imported=None):
@@ -848,6 +886,85 @@ def _expr_involves_float_calc(expr, local_exprs, float_vars=None, imported=None)
     return False
 
 
+def _collect_local_var_context(
+    func_node,
+    eff_imported,
+    initial_safe_tmp=None,
+    initial_hardcoded=None,
+    initial_float=None,
+    extra_decorators=None,
+):
+    """Collect (safe_tmp_vars, hardcoded_path_vars, float_vars, local_exprs, local_int_consts) for `func_node`."""
+    safe_tmp_vars = {
+        arg.arg
+        for arg in (
+            list(getattr(getattr(func_node, "args", None), "posonlyargs", []))
+            + list(getattr(getattr(func_node, "args", None), "args", []))
+            + list(getattr(getattr(func_node, "args", None), "kwonlyargs", []))
+        )
+        if arg.arg in TMP_FIXTURE_NAMES
+    }
+    if initial_safe_tmp:
+        safe_tmp_vars.update(initial_safe_tmp)
+    hardcoded_path_vars = set(initial_hardcoded or ())
+    local_int_consts = {}
+    local_exprs = {}
+    float_vars = _extract_func_float_vars(
+        func_node, initial_float_vars=initial_float, extra_decorators=extra_decorators
+    )
+
+    for node in ast.walk(func_node):
+        targets, val = _extract_assign_targets_and_value(node)
+        if targets and val is not None:
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    local_exprs[target.id] = val
+                    if (
+                        isinstance(val, ast.Constant)
+                        and isinstance(val.value, int)
+                        and not isinstance(val.value, bool)
+                    ):
+                        local_int_consts[target.id] = val.value
+
+    for _ in range(2):
+        for node in ast.walk(func_node):
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    if _is_safe_temp_expr(
+                        item.context_expr, safe_tmp_vars, local_exprs=local_exprs, imported=eff_imported
+                    ):
+                        if isinstance(item.optional_vars, ast.Name):
+                            safe_tmp_vars.add(item.optional_vars.id)
+                        elif isinstance(item.optional_vars, ast.Tuple):
+                            for elt in item.optional_vars.elts:
+                                if isinstance(elt, ast.Name):
+                                    safe_tmp_vars.add(elt.id)
+            else:
+                targets, val = _extract_assign_targets_and_value(node)
+                if targets and val is not None:
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            if _is_safe_temp_expr(
+                                val, safe_tmp_vars, local_exprs=local_exprs, imported=eff_imported
+                            ):
+                                safe_tmp_vars.add(target.id)
+                                hardcoded_path_vars.discard(target.id)
+                            elif _is_hardcoded_path_expr(
+                                val,
+                                safe_tmp_vars,
+                                hardcoded_path_vars,
+                                local_exprs=local_exprs,
+                                imported=eff_imported,
+                            ):
+                                hardcoded_path_vars.add(target.id)
+                            if _expr_involves_float_calc(
+                                val, local_exprs, float_vars=float_vars, imported=eff_imported
+                            ) or (isinstance(val, ast.Name) and val.id in float_vars):
+                                float_vars.add(target.id)
+
+    return safe_tmp_vars, hardcoded_path_vars, float_vars, local_exprs, local_int_consts
+
+
 def _scan_function_signals(
     func_node,
     file_rel,
@@ -897,72 +1014,20 @@ def _scan_function_signals(
     if has_float_return_ann:
         signals["returns_float"] = True
 
-    # Collect local variable assignments for temp-path, hardcoded-path, port-int, and float tracking
-    safe_tmp_vars = {
-        arg.arg
-        for arg in (
-            list(getattr(getattr(func_node, "args", None), "posonlyargs", []))
-            + list(getattr(getattr(func_node, "args", None), "args", []))
-            + list(getattr(getattr(func_node, "args", None), "kwonlyargs", []))
-        )
-        if arg.arg in TMP_FIXTURE_NAMES
-    }
-    if initial_safe_tmp_vars:
-        safe_tmp_vars.update(initial_safe_tmp_vars)
-    hardcoded_path_vars = set(initial_hardcoded_vars or ())
-    local_int_consts = {}
-    local_exprs = {}
-    float_vars = _extract_func_float_vars(
-        func_node, initial_float_vars=initial_float_vars, extra_decorators=extra_decorators
+    (
+        safe_tmp_vars,
+        hardcoded_path_vars,
+        float_vars,
+        local_exprs,
+        local_int_consts,
+    ) = _collect_local_var_context(
+        func_node,
+        eff_imported,
+        initial_safe_tmp=initial_safe_tmp_vars,
+        initial_hardcoded=initial_hardcoded_vars,
+        initial_float=initial_float_vars,
+        extra_decorators=extra_decorators,
     )
-
-    for node in ast.walk(func_node):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    local_exprs[target.id] = node.value
-                    if (
-                        isinstance(node.value, ast.Constant)
-                        and isinstance(node.value.value, int)
-                        and not isinstance(node.value.value, bool)
-                    ):
-                        local_int_consts[target.id] = node.value.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None and isinstance(node.target, ast.Name):
-            local_exprs[node.target.id] = node.value
-
-    for _ in range(2):
-        for node in ast.walk(func_node):
-            if isinstance(node, ast.With):
-                for item in node.items:
-                    if _is_safe_temp_expr(
-                        item.context_expr, safe_tmp_vars, local_exprs=local_exprs, imported=eff_imported
-                    ):
-                        if isinstance(item.optional_vars, ast.Name):
-                            safe_tmp_vars.add(item.optional_vars.id)
-                        elif isinstance(item.optional_vars, ast.Tuple):
-                            for elt in item.optional_vars.elts:
-                                if isinstance(elt, ast.Name):
-                                    safe_tmp_vars.add(elt.id)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        if _is_safe_temp_expr(
-                            node.value, safe_tmp_vars, local_exprs=local_exprs, imported=eff_imported
-                        ):
-                            safe_tmp_vars.add(target.id)
-                            hardcoded_path_vars.discard(target.id)
-                        elif _is_hardcoded_path_expr(
-                            node.value,
-                            safe_tmp_vars,
-                            hardcoded_path_vars,
-                            local_exprs=local_exprs,
-                            imported=eff_imported,
-                        ):
-                            hardcoded_path_vars.add(target.id)
-                        if _expr_involves_float_calc(
-                            node.value, local_exprs, float_vars=float_vars, imported=eff_imported
-                        ) or (isinstance(node.value, ast.Name) and node.value.id in float_vars):
-                            float_vars.add(target.id)
 
     # Check for @lru_cache / @cache decorators on Code Side functions
     for dec in getattr(func_node, "decorator_list", []):
@@ -1009,11 +1074,12 @@ def _scan_function_signals(
     for node in ast.walk(func_node):
         if isinstance(node, ast.Call) and _is_worker_spawn_call(node, imported=eff_imported) is not None:
             total_worker_spawns += 1
-        if isinstance(node, ast.Assign):
-            prim = _is_worker_spawn_call(node.value, imported=eff_imported)
+        targets, val = _extract_assign_targets_and_value(node)
+        if targets and val is not None:
+            prim = _is_worker_spawn_call(val, imported=eff_imported)
             if prim is not None:
-                target_names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-                assigned_worker_calls[id(node.value)] = target_names
+                target_names = [t.id for t in targets if isinstance(t, ast.Name)]
+                assigned_worker_calls[id(val)] = target_names
 
     for node in ast.walk(func_node):
         if isinstance(node, ast.Return) and node.value is not None:
@@ -1453,10 +1519,11 @@ def _infer_returned_class(func_node, imported=None):
     """If a function/fixture returns or yields a Call like `Cart('user')` or a variable assigned one, return its head name."""
     local_assigns = {}
     for node in ast.walk(func_node):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-            head = _call_head_name(node.value, imported=imported)
+        targets, val = _extract_assign_targets_and_value(node)
+        if targets and isinstance(val, ast.Call):
+            head = _call_head_name(val, imported=imported)
             if head:
-                for t in node.targets:
+                for t in targets:
                     if isinstance(t, ast.Name):
                         local_assigns[t.id] = head
     for node in ast.walk(func_node):
@@ -1481,13 +1548,13 @@ def _fixture_returns_safe_temp(func_node, imported=None):
         )
         if arg.arg in TMP_FIXTURE_NAMES
     }
-    local_exprs = {
-        t.id: n.value
-        for n in ast.walk(func_node)
-        if isinstance(n, ast.Assign)
-        for t in n.targets
-        if isinstance(t, ast.Name)
-    }
+    local_exprs = {}
+    for n in ast.walk(func_node):
+        targets, val = _extract_assign_targets_and_value(n)
+        if targets and val is not None:
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    local_exprs[t.id] = val
     for n in ast.walk(func_node):
         if isinstance(n, (ast.Return, ast.Yield)) and n.value is not None:
             if _is_safe_temp_expr(n.value, safe_vars, local_exprs=local_exprs, imported=imported):
@@ -1495,66 +1562,54 @@ def _fixture_returns_safe_temp(func_node, imported=None):
     return False
 
 
-def _find_fixture_defs(param_names, test_tree, test_file, project_path, enclosing_cls=None):
-    """Find fixture definitions matching `param_names` or `autouse=True` (plus upstream fixture deps up to 3 hops)
-    in `test_tree`, `enclosing_cls`, or ancestor `conftest.py` files."""
-    wanted = set(param_names or ())
-    found = []
-    candidate_files = [(test_file, test_tree)]
-    cur_dir = test_file.resolve().parent
-    proj_resolved = project_path.resolve()
-    while True:
-        conftest = cur_dir / "conftest.py"
-        if conftest.is_file() and conftest != test_file.resolve():
-            ct_tree = _parse_file(conftest)
-            if ct_tree is not None:
-                candidate_files.append((conftest, ct_tree))
-        if cur_dir == proj_resolved or cur_dir.parent == cur_dir:
-            break
-        cur_dir = cur_dir.parent
+def _iter_fixture_teardown_stmts(stmts):
+    """Yield AST statements executed in the post-yield teardown phase of a generator fixture."""
+    after_yield = False
+    for stmt in stmts or []:
+        if after_yield:
+            yield stmt
+            continue
+        if isinstance(stmt, ast.Try):
+            has_body_yield = any(
+                isinstance(sub, (ast.Yield, ast.YieldFrom)) for b in stmt.body for sub in ast.walk(b)
+            )
+            if has_body_yield:
+                yield from _iter_fixture_teardown_stmts(stmt.body)
+                yield from stmt.finalbody
+                after_yield = True
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            has_body_yield = any(
+                isinstance(sub, (ast.Yield, ast.YieldFrom)) for b in stmt.body for sub in ast.walk(b)
+            )
+            if has_body_yield:
+                yield from _iter_fixture_teardown_stmts(stmt.body)
+                after_yield = True
+        elif any(isinstance(sub, (ast.Yield, ast.YieldFrom)) for sub in ast.walk(stmt)):
+            after_yield = True
 
-    all_fixture_nodes = []
-    if enclosing_cls is not None:
-        for node in getattr(enclosing_cls, "body", []):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_fixture_func(node):
-                all_fixture_nodes.append((node.name, test_file, test_tree, node))
-    for f_path, f_tree in candidate_files:
-        for node in getattr(f_tree, "body", []):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_fixture_func(node):
-                all_fixture_nodes.append((node.name, f_path, f_tree, node))
 
-    seen_names = set()
-    frontier = set()
-    for fix_name, f_path, f_tree, node in all_fixture_nodes:
-        if fix_name not in seen_names and (fix_name in wanted or _is_autouse_fixture(node)):
-            seen_names.add(fix_name)
-            found.append((fix_name, f_path, f_tree, node))
-            for arg in (
-                list(getattr(node.args, "posonlyargs", []))
-                + list(getattr(node.args, "args", []))
-                + list(getattr(node.args, "kwonlyargs", []))
+def _collect_teardown_clear_calls(func_node, is_teardown_func=False):
+    """Return set of `id(attr_node)` for `<GLOBAL>.clear()` / `<GLOBAL>.reset()` calls in teardown phases."""
+    exempt_attr_ids = set()
+    if is_teardown_func:
+        teardown_stmts = list(getattr(func_node, "body", []))
+    elif _is_fixture_func(func_node):
+        teardown_stmts = list(_iter_fixture_teardown_stmts(getattr(func_node, "body", [])))
+    else:
+        return exempt_attr_ids
+
+    for stmt in teardown_stmts:
+        for sub in ast.walk(stmt):
+            if (
+                isinstance(sub, ast.Call)
+                and not sub.args
+                and not sub.keywords
+                and isinstance(sub.func, ast.Attribute)
+                and sub.func.attr in ("clear", "reset")
+                and isinstance(sub.func.value, ast.Name)
             ):
-                if arg.arg != "self" and arg.arg not in seen_names:
-                    frontier.add(arg.arg)
-
-    for _ in range(MAX_CALL_DEPTH):
-        if not frontier:
-            break
-        next_frontier = set()
-        for fix_name, f_path, f_tree, node in all_fixture_nodes:
-            if fix_name in frontier and fix_name not in seen_names:
-                seen_names.add(fix_name)
-                found.append((fix_name, f_path, f_tree, node))
-                for arg in (
-                    list(getattr(node.args, "posonlyargs", []))
-                    + list(getattr(node.args, "args", []))
-                    + list(getattr(node.args, "kwonlyargs", []))
-                ):
-                    if arg.arg != "self" and arg.arg not in seen_names:
-                        next_frontier.add(arg.arg)
-        frontier = next_frontier
-
-    return found
+                exempt_attr_ids.add(id(sub.func))
+    return exempt_attr_ids
 
 
 def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
@@ -1565,16 +1620,22 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
         if isinstance(node, ast.Global)
         for name in node.names
     }
-    local_assigned_names = {
-        target.id
-        for node in ast.walk(func_node)
-        if isinstance(node, ast.Assign)
-        for target in node.targets
-        if isinstance(target, ast.Name) and target.id not in global_decls
-    }
+    local_assigned_names = set()
+    for node in ast.walk(func_node):
+        targets, val = _extract_assign_targets_and_value(node)
+        if targets and val is not None:
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in global_decls:
+                    local_assigned_names.add(target.id)
+
+    is_teardown_fn = getattr(func_node, "name", "") in TEARDOWN_METHODS
+    exempt_attr_ids = _collect_teardown_clear_calls(func_node, is_teardown_func=is_teardown_fn)
+
     shared_hits = []
     for node in ast.walk(func_node):
         if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.value, ast.Name):
+            if isinstance(node, ast.Attribute) and id(node) in exempt_attr_ids:
+                continue
             var_name = node.value.id
             if var_name in module_globals and var_name not in local_assigned_names:
                 shared_hits.append((node.lineno, var_name))
@@ -1599,6 +1660,218 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
             ),
         })
     return results
+
+
+def _collect_class_self_attrs(cls_node, tree=None, imported=None):
+    """Collect `self.<attr> -> ClassName` mappings across `cls_node` and its same-file base classes.
+
+    Scans class-level attribute assignments, `__init__`, pytest/unittest setup methods, and
+    class-level `@pytest.fixture` methods for both `ast.Assign` and `ast.AnnAssign`.
+    """
+    self_attrs = {}
+    for cur_cls in _iter_class_hierarchy(cls_node, tree=tree):
+        for item in getattr(cur_cls, "body", []):
+            targets, val = _extract_assign_targets_and_value(item)
+            if targets and val is not None and not isinstance(val, (ast.Constant, ast.Tuple)):
+                call_head = _call_head_name(val, imported=imported)
+                if call_head:
+                    for t in targets:
+                        if isinstance(t, ast.Name):
+                            self_attrs.setdefault(t.id, call_head)
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                item.name in ATTR_INIT_METHODS or _is_fixture_func(item)
+            ):
+                for sub in ast.walk(item):
+                    sub_targets, sub_val = _extract_assign_targets_and_value(sub)
+                    if sub_targets and isinstance(sub_val, ast.Call):
+                        head = _call_head_name(sub_val, imported=imported)
+                        if head:
+                            for t in sub_targets:
+                                if (
+                                    isinstance(t, ast.Attribute)
+                                    and isinstance(t.value, ast.Name)
+                                    and t.value.id == "self"
+                                ):
+                                    self_attrs.setdefault(t.attr, head)
+    return self_attrs
+
+
+def _scan_class_shared_state(func_node, cls_node, file_rel, side, reset_class_attrs, tree=None):
+    """Scan `func_node` for accesses/mutations of class-level shared state on `cls_node` (Test Side or Code Side)."""
+    if cls_node is None:
+        return []
+    cls_mutable_attrs = {}
+    cls_all_attrs = {}
+    hierarchy_names = {"self", "cls"}
+    for c in _iter_class_hierarchy(cls_node, tree=tree):
+        hierarchy_names.add(c.name)
+        for item in getattr(c, "body", []):
+            targets, val = _extract_assign_targets_and_value(item)
+            if targets and val is not None:
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        cls_all_attrs.setdefault(t.id, item.lineno)
+                        if not isinstance(val, (ast.Constant, ast.Tuple)):
+                            cls_mutable_attrs.setdefault(t.id, item.lineno)
+
+    if not cls_all_attrs:
+        return []
+
+    class_only_names = hierarchy_names - {"self"}
+    is_init_or_setup = getattr(func_node, "name", "") in ATTR_INIT_METHODS
+    hits = []
+
+    for sub in ast.walk(func_node):
+        if (
+            isinstance(sub, (ast.Attribute, ast.Subscript))
+            and isinstance(sub.value, ast.Attribute)
+            and isinstance(sub.value.value, ast.Name)
+            and sub.value.value.id in hierarchy_names
+            and sub.value.attr in cls_mutable_attrs
+            and (cls_node.name, sub.value.attr) not in reset_class_attrs
+        ):
+            hits.append((sub.lineno, sub.value.attr, cls_mutable_attrs[sub.value.attr]))
+        elif isinstance(sub, ast.AugAssign):
+            target = sub.target
+            attr_name = None
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id in hierarchy_names
+                and target.attr in cls_all_attrs
+            ):
+                attr_name = target.attr
+            elif (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Attribute)
+                and isinstance(target.value.value, ast.Name)
+                and target.value.value.id in hierarchy_names
+                and target.value.attr in cls_all_attrs
+            ):
+                attr_name = target.value.attr
+            if attr_name and (cls_node.name, attr_name) not in reset_class_attrs:
+                hits.append((sub.lineno, attr_name, cls_all_attrs[attr_name]))
+        elif not is_init_or_setup:
+            targets, val = _extract_assign_targets_and_value(sub)
+            if targets and val is not None:
+                for t in targets:
+                    if (
+                        isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id in class_only_names
+                        and t.attr in cls_all_attrs
+                        and (cls_node.name, t.attr) not in reset_class_attrs
+                    ):
+                        hits.append((sub.lineno, t.attr, cls_all_attrs[t.attr]))
+
+    hits.sort(key=lambda item: item[0])
+    seen_attrs = set()
+    results = []
+    for lineno, attr_name, decl_ln in hits:
+        if attr_name in seen_attrs:
+            continue
+        seen_attrs.add(attr_name)
+        results.append({
+            "side": side,
+            "location": f"{file_rel}:{lineno}",
+            "detail": (
+                f"accesses/mutates shared class-level attribute "
+                f"`{cls_node.name}.{attr_name}` (declared at `{file_rel}:{decl_ln}`)"
+            ),
+        })
+    return results
+
+
+# ============================================================================
+# SECTION 3: Call-Graph & Test Source Inspector
+# ============================================================================
+
+
+def _find_fixture_defs(param_names, test_tree, test_file, project_path, enclosing_cls=None):
+    """Find fixture definitions matching `param_names` or `autouse=True` (plus upstream fixture deps up to 3 hops)
+    in `test_tree`, `enclosing_cls`, or ancestor `conftest.py` files, supporting same-name parent conftest delegation."""
+    wanted = set(param_names or ())
+    found = []
+    candidate_files = [(test_file, test_tree)]
+    cur_dir = test_file.resolve().parent
+    proj_resolved = project_path.resolve()
+    while True:
+        conftest = cur_dir / "conftest.py"
+        if conftest.is_file() and conftest != test_file.resolve():
+            ct_tree = _parse_file(conftest)
+            if ct_tree is not None:
+                candidate_files.append((conftest, ct_tree))
+        if cur_dir == proj_resolved or cur_dir.parent == cur_dir:
+            break
+        cur_dir = cur_dir.parent
+
+    all_fixture_nodes = []
+    if enclosing_cls is not None:
+        for cls_in_mro in _iter_class_hierarchy(enclosing_cls, tree=test_tree):
+            for node in getattr(cls_in_mro, "body", []):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_fixture_func(node):
+                    all_fixture_nodes.append((node.name, test_file, test_tree, node))
+    for f_path, f_tree in candidate_files:
+        for node in getattr(f_tree, "body", []):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _is_fixture_func(node):
+                all_fixture_nodes.append((node.name, f_path, f_tree, node))
+
+    def _resolve_from(req_name, min_idx=0):
+        for idx in range(min_idx, len(all_fixture_nodes)):
+            fix_name, f_path, f_tree, node = all_fixture_nodes[idx]
+            if fix_name == req_name:
+                return idx, (fix_name, f_path, f_tree, node)
+        return None
+
+    def _fixture_arg_requests(fix_name, idx, node):
+        reqs = []
+        for arg in (
+            list(getattr(node.args, "posonlyargs", []))
+            + list(getattr(node.args, "args", []))
+            + list(getattr(node.args, "kwonlyargs", []))
+        ):
+            if arg.arg != "self":
+                next_min_idx = (idx + 1) if arg.arg == fix_name else 0
+                reqs.append((arg.arg, next_min_idx))
+        return reqs
+
+    seen_defs = set()
+    frontier = []
+
+    initial_matches = []
+    for idx, entry in enumerate(all_fixture_nodes):
+        fix_name, f_path, f_tree, node = entry
+        if _is_autouse_fixture(node):
+            initial_matches.append((idx, entry))
+    for req_name in wanted:
+        res = _resolve_from(req_name, 0)
+        if res is not None:
+            initial_matches.append(res)
+
+    for idx, (fix_name, f_path, f_tree, node) in initial_matches:
+        def_key = (f_path.resolve(), id(node))
+        if def_key not in seen_defs:
+            seen_defs.add(def_key)
+            found.append((fix_name, f_path, f_tree, node))
+            frontier.extend(_fixture_arg_requests(fix_name, idx, node))
+
+    for _ in range(MAX_CALL_DEPTH):
+        if not frontier:
+            break
+        next_frontier = []
+        for req_name, min_idx in frontier:
+            res = _resolve_from(req_name, min_idx)
+            if res is None:
+                continue
+            idx, (fix_name, f_path, f_tree, node) = res
+            def_key = (f_path.resolve(), id(node))
+            if def_key not in seen_defs:
+                seen_defs.add(def_key)
+                found.append((fix_name, f_path, f_tree, node))
+                next_frontier.extend(_fixture_arg_requests(fix_name, idx, node))
+        frontier = next_frontier
+
+    return found
 
 
 def _bind_call_arg_sets(
@@ -1655,58 +1928,24 @@ def _bind_call_arg_sets(
     return callee_safe, callee_hard, callee_float
 
 
-def _extract_caller_context(func_node, imported, initial_safe_tmp=None, initial_hardcoded=None, initial_float=None, extra_decorators=None):
+def _extract_caller_context(
+    func_node,
+    imported,
+    initial_safe_tmp=None,
+    initial_hardcoded=None,
+    initial_float=None,
+    extra_decorators=None,
+):
     """Extract a function's effective safe_tmp_vars, hardcoded_path_vars, float_vars, and local_exprs."""
     eff_imported = _collect_local_imports(func_node, imported)
-    safe_tmp_vars = {
-        arg.arg
-        for arg in (
-            list(getattr(getattr(func_node, "args", None), "posonlyargs", []))
-            + list(getattr(getattr(func_node, "args", None), "args", []))
-            + list(getattr(getattr(func_node, "args", None), "kwonlyargs", []))
-        )
-        if arg.arg in TMP_FIXTURE_NAMES
-    }
-    if initial_safe_tmp:
-        safe_tmp_vars.update(initial_safe_tmp)
-    hardcoded_vars = set(initial_hardcoded or ())
-    float_vars = _extract_func_float_vars(
-        func_node, initial_float_vars=initial_float, extra_decorators=extra_decorators
+    safe_tmp_vars, hardcoded_vars, float_vars, local_exprs, _ = _collect_local_var_context(
+        func_node,
+        eff_imported,
+        initial_safe_tmp=initial_safe_tmp,
+        initial_hardcoded=initial_hardcoded,
+        initial_float=initial_float,
+        extra_decorators=extra_decorators,
     )
-    local_exprs = {}
-    for node in ast.walk(func_node):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    local_exprs[target.id] = node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None and isinstance(node.target, ast.Name):
-            local_exprs[node.target.id] = node.value
-
-    for _ in range(2):
-        for node in ast.walk(func_node):
-            if isinstance(node, ast.With):
-                for item in node.items:
-                    if _is_safe_temp_expr(
-                        item.context_expr, safe_tmp_vars, local_exprs=local_exprs, imported=eff_imported
-                    ):
-                        if isinstance(item.optional_vars, ast.Name):
-                            safe_tmp_vars.add(item.optional_vars.id)
-            elif isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        if _is_safe_temp_expr(
-                            node.value, safe_tmp_vars, local_exprs=local_exprs, imported=eff_imported
-                        ):
-                            safe_tmp_vars.add(target.id)
-                            hardcoded_vars.discard(target.id)
-                        elif _is_hardcoded_path_expr(
-                            node.value, safe_tmp_vars, hardcoded_vars, local_exprs=local_exprs, imported=eff_imported
-                        ):
-                            hardcoded_vars.add(target.id)
-                        if _expr_involves_float_calc(
-                            node.value, local_exprs, float_vars=float_vars, imported=eff_imported
-                        ) or (isinstance(node.value, ast.Name) and node.value.id in float_vars):
-                            float_vars.add(target.id)
     return safe_tmp_vars, hardcoded_vars, float_vars, local_exprs
 
 
@@ -1775,7 +2014,6 @@ def inspect_test_source(test_id, project_dir=None):
     if test_func is None:
         return empty
 
-    test_rel = _rel_path(test_file, project_path)
     imported, module_globals = _collect_imports_and_globals(
         test_tree, project_path, current_file=test_file
     )
@@ -1816,32 +2054,27 @@ def inspect_test_source(test_id, project_dir=None):
 
     # Track local variable and self.<attr> assignments to classes: e.g., cart = Cart("user")
     base_local_vars = {}
-    base_self_attrs = {}
     for g_name, (_, g_call) in module_globals.items():
         if g_call:
             base_local_vars[g_name] = g_call
 
+    base_self_attrs = (
+        _collect_class_self_attrs(enclosing_cls, tree=test_tree)
+        if enclosing_cls is not None
+        else {}
+    )
     setup_nodes = []
     if enclosing_cls is not None:
-        for item in getattr(enclosing_cls, "body", []):
-            if isinstance(item, ast.Assign) and not isinstance(item.value, (ast.Constant, ast.Tuple)):
-                call_head = _call_head_name(item.value)
-                for t in item.targets:
-                    if isinstance(t, ast.Name) and call_head:
-                        base_self_attrs[t.id] = call_head
-            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in SETUP_METHODS:
-                setup_nodes.append(item)
-                for sub in ast.walk(item):
-                    if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
-                        head = _call_head_name(sub.value)
-                        if head:
-                            for t in sub.targets:
-                                if (
-                                    isinstance(t, ast.Attribute)
-                                    and isinstance(t.value, ast.Name)
-                                    and t.value.id == "self"
-                                ):
-                                    base_self_attrs[t.attr] = head
+        seen_setup_names = set()
+        for cls_in_mro in _iter_class_hierarchy(enclosing_cls, tree=test_tree):
+            for item in getattr(cls_in_mro, "body", []):
+                if (
+                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and item.name in SETUP_METHODS
+                    and item.name not in seen_setup_names
+                ):
+                    seen_setup_names.add(item.name)
+                    setup_nodes.append(item)
 
     # Pre-scan fixtures for imports, returned classes, safe temp paths, and network mocks
     fixture_safe_tmp_names = set()
@@ -1871,20 +2104,29 @@ def inspect_test_source(test_id, project_dir=None):
                 base_local_vars[f"__factory__:{node.name}"] = ret_cls
 
     # Track class attributes and modules explicitly reset by test/setup/fixtures
+    enclosing_hierarchy_names = (
+        {"self", "cls"} | {c.name for c in _iter_class_hierarchy(enclosing_cls, tree=test_tree)}
+        if enclosing_cls is not None
+        else {"self", "cls"}
+    )
     reset_class_attrs = set()
     reset_modules = set()
     for root_node in all_test_func_nodes + setup_nodes:
+        is_setup_or_teardown = getattr(root_node, "name", "") in SETUP_METHODS
         for node in ast.walk(root_node):
-            if isinstance(node, ast.Assign):
-                for t in node.targets:
+            targets, val = _extract_assign_targets_and_value(node)
+            if targets and val is not None:
+                for t in targets:
                     if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name):
-                        reset_class_attrs.add((t.value.id, t.attr))
+                        if is_setup_or_teardown or t.value.id not in enclosing_hierarchy_names:
+                            reset_class_attrs.add((t.value.id, t.attr))
                     elif (
                         isinstance(t, ast.Subscript)
                         and isinstance(t.value, ast.Attribute)
                         and isinstance(t.value.value, ast.Name)
                     ):
-                        reset_class_attrs.add((t.value.value.id, t.value.attr))
+                        if is_setup_or_teardown or t.value.value.id not in enclosing_hierarchy_names:
+                            reset_class_attrs.add((t.value.value.id, t.value.attr))
             elif isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name) and node.func.id in imported:
                     fn_name = node.func.id
@@ -1921,7 +2163,7 @@ def inspect_test_source(test_id, project_dir=None):
             file_key = str(Path(t_file).resolve())
         except OSError:
             file_key = str(t_file)
-        visit_key = (file_key, t_desc, t_side)
+        visit_key = (file_key, t_desc, getattr(t_func, "lineno", 0), t_side)
         if visit_key in visited_targets:
             return
         visited_targets.add(visit_key)
@@ -2028,6 +2270,11 @@ def inspect_test_source(test_id, project_dir=None):
                 indicators[key].extend(_tag_via_helper(cur_signals[key], cur_via))
             shared_hits = _scan_shared_globals_in_func(cur_func, cur_rel, cur_globals, "Test Side")
             indicators["shared_state_interference"].extend(_tag_via_helper(shared_hits, cur_via))
+            if cur_cls is not None and getattr(cur_func, "name", "") not in SETUP_METHODS:
+                cls_shared_hits = _scan_class_shared_state(
+                    cur_func, cur_cls, cur_rel, "Test Side", reset_class_attrs, tree=cur_tree
+                )
+                indicators["shared_state_interference"].extend(_tag_via_helper(cls_shared_hits, cur_via))
             if cur_depth > 0 and cur_signals["returns_float"]:
                 float_returning_callees.append((cur_rel, cur_func, cur_desc))
             if cur_depth > 0 and cur_signals["returns_set"]:
@@ -2052,34 +2299,11 @@ def inspect_test_source(test_id, project_dir=None):
                     _scan_shared_globals_in_func(cur_func, cur_rel, cur_globals, "Code Side")
                 )
                 if cur_cls is not None:
-                    cls_mutable_attrs = {}
-                    for item in getattr(cur_cls, "body", []):
-                        if isinstance(item, ast.Assign) and not isinstance(
-                            item.value, (ast.Constant, ast.Tuple)
-                        ):
-                            for t in item.targets:
-                                if isinstance(t, ast.Name):
-                                    cls_mutable_attrs[t.id] = item.lineno
-                    if cls_mutable_attrs:
-                        for sub in ast.walk(cur_func):
-                            if (
-                                isinstance(sub, (ast.Attribute, ast.Subscript))
-                                and isinstance(sub.value, ast.Attribute)
-                                and isinstance(sub.value.value, ast.Name)
-                                and sub.value.value.id in (cur_cls.name, "self", "cls")
-                                and sub.value.attr in cls_mutable_attrs
-                                and (cur_cls.name, sub.value.attr) not in reset_class_attrs
-                            ):
-                                decl_ln = cls_mutable_attrs[sub.value.attr]
-                                indicators["shared_state_interference"].append({
-                                    "side": "Code Side",
-                                    "location": f"{cur_rel}:{sub.lineno}",
-                                    "detail": (
-                                        f"accesses/mutates shared class-level attribute "
-                                        f"`{cur_cls.name}.{sub.value.attr}` (declared at `{cur_rel}:{decl_ln}`)"
-                                    ),
-                                })
-                                break
+                    indicators["shared_state_interference"].extend(
+                        _scan_class_shared_state(
+                            cur_func, cur_cls, cur_rel, "Code Side", reset_class_attrs, tree=cur_tree
+                        )
+                    )
 
             if cur_signals["returns_set"]:
                 set_returning_callees.append((cur_rel, cur_func, cur_desc))
@@ -2105,31 +2329,16 @@ def inspect_test_source(test_id, project_dir=None):
             if g_call:
                 local_vars.setdefault(g_name, g_call)
         if cur_cls is not None:
-            for item in getattr(cur_cls, "body", []):
-                if isinstance(item, ast.Assign) and not isinstance(item.value, (ast.Constant, ast.Tuple)):
-                    call_head = _call_head_name(item.value)
-                    for t in item.targets:
-                        if isinstance(t, ast.Name) and call_head:
-                            self_attrs.setdefault(t.id, call_head)
-                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in SETUP_METHODS:
-                    for sub in ast.walk(item):
-                        if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call):
-                            head = _call_head_name(sub.value)
-                            if head:
-                                for t in sub.targets:
-                                    if (
-                                        isinstance(t, ast.Attribute)
-                                        and isinstance(t.value, ast.Name)
-                                        and t.value.id == "self"
-                                    ):
-                                        self_attrs.setdefault(t.attr, head)
+            for attr_k, attr_v in _collect_class_self_attrs(cur_cls, tree=cur_tree).items():
+                self_attrs.setdefault(attr_k, attr_v)
 
         for node in ast.walk(cur_func):
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-                head = _call_head_name(node.value)
+            targets, val = _extract_assign_targets_and_value(node)
+            if targets and isinstance(val, ast.Call):
+                head = _call_head_name(val)
                 if head:
                     resolved_cls = local_vars.get(f"__factory__:{head}", head)
-                    for target in node.targets:
+                    for target in targets:
                         if isinstance(target, ast.Name):
                             local_vars[target.id] = resolved_cls
                         elif (
@@ -2158,7 +2367,7 @@ def inspect_test_source(test_id, project_dir=None):
                 f_key = str(Path(c_file).resolve())
             except OSError:
                 f_key = str(c_file)
-            key = (f_key, c_desc, c_side)
+            key = (f_key, c_desc, getattr(c_func, "lineno", 0), c_side)
             b_safe, b_hard, b_float = _bind_call_arg_sets(
                 call_node,
                 c_func,
@@ -2187,10 +2396,19 @@ def inspect_test_source(test_id, project_dir=None):
                 pending_callees[key][8].update(b_hard)
                 pending_callees[key][9].update(b_float)
 
-        for sub in ast.walk(cur_func):
-            if not isinstance(sub, ast.Call):
-                continue
+        call_candidates = [sub for sub in ast.walk(cur_func) if isinstance(sub, ast.Call)]
+        for dec in list(getattr(cur_func, "decorator_list", [])) + list(extra_decs or []):
+            if isinstance(dec, (ast.Name, ast.Attribute)):
+                call_candidates.append(
+                    ast.Call(
+                        func=dec,
+                        args=[],
+                        keywords=[],
+                        lineno=getattr(dec, "lineno", getattr(cur_func, "lineno", 1)),
+                    )
+                )
 
+        for sub in call_candidates:
             if isinstance(sub.func, ast.Name):
                 callee_name = sub.func.id
                 local_def = _find_top_def(cur_tree, callee_name)
@@ -2208,7 +2426,7 @@ def inspect_test_source(test_id, project_dir=None):
                         is_method=False,
                     )
                 elif isinstance(local_def, ast.ClassDef):
-                    init_m = _find_method_in_class(local_def, "__init__")
+                    init_m = _find_method_in_class(local_def, "__init__", tree=cur_tree)
                     if init_m is not None:
                         next_via = (cur_via or f"{callee_name}.__init__") if cur_side == "Test Side" else None
                         stage_callee(
@@ -2247,7 +2465,7 @@ def inspect_test_source(test_id, project_dir=None):
                                         is_method=False,
                                     )
                                 elif isinstance(defn, ast.ClassDef):
-                                    init_m = _find_method_in_class(defn, "__init__")
+                                    init_m = _find_method_in_class(defn, "__init__", tree=mod_tree)
                                     if init_m is not None:
                                         stage_callee(
                                             sub,
@@ -2268,7 +2486,7 @@ def inspect_test_source(test_id, project_dir=None):
                     and isinstance(sub.func.value, ast.Name)
                     and sub.func.value.id in ("self", "cls")
                 ):
-                    helper_m = _find_method_in_class(cur_cls, method_name)
+                    helper_m = _find_method_in_class(cur_cls, method_name, tree=cur_tree)
                     if helper_m is not None:
                         m_desc = f"{cur_cls.name}.{method_name}"
                         next_via = (cur_via or m_desc) if cur_side == "Test Side" else None
@@ -2304,7 +2522,7 @@ def inspect_test_source(test_id, project_dir=None):
                 # 1. Check same-file class definition
                 local_cls = _find_top_def(cur_tree, class_symbol)
                 if isinstance(local_cls, ast.ClassDef):
-                    m_node = _find_method_in_class(local_cls, method_name)
+                    m_node = _find_method_in_class(local_cls, method_name, tree=cur_tree)
                     if m_node is not None:
                         m_desc = f"{local_cls.name}.{method_name}"
                         next_via = (cur_via or m_desc) if cur_side == "Test Side" else None
@@ -2340,7 +2558,7 @@ def inspect_test_source(test_id, project_dir=None):
                         )
                         defn = _find_top_def(mod_tree, remote_symbol)
                         if isinstance(defn, ast.ClassDef):
-                            m_node = _find_method_in_class(defn, method_name)
+                            m_node = _find_method_in_class(defn, method_name, tree=mod_tree)
                             if m_node is not None:
                                 m_desc = f"{remote_symbol}.{method_name}"
                                 next_via = (cur_via or m_desc) if next_side == "Test Side" else None
@@ -2372,7 +2590,7 @@ def inspect_test_source(test_id, project_dir=None):
                                     is_method=False,
                                 )
                             elif isinstance(top_def, ast.ClassDef):
-                                init_m = _find_method_in_class(top_def, "__init__")
+                                init_m = _find_method_in_class(top_def, "__init__", tree=mod_tree)
                                 if init_m is not None:
                                     m_desc = f"{method_name}.__init__"
                                     next_via = (cur_via or m_desc) if next_side == "Test Side" else None
@@ -2432,13 +2650,13 @@ def inspect_test_source(test_id, project_dir=None):
         for code_rel, func_node, desc in float_returning_callees:
             leaf_sym = desc.split(".")[-1]
             for ts_file, ts_rel, ts_func, ts_via, ts_imported in scanned_test_side_funcs:
-                ts_local_exprs = {
-                    t.id: n.value
-                    for n in ast.walk(ts_func)
-                    if isinstance(n, ast.Assign)
-                    for t in n.targets
-                    if isinstance(t, ast.Name)
-                }
+                ts_local_exprs = {}
+                for n in ast.walk(ts_func):
+                    targets, val = _extract_assign_targets_and_value(n)
+                    if targets and val is not None:
+                        for t in targets:
+                            if isinstance(t, ast.Name):
+                                ts_local_exprs[t.id] = val
                 float_assert_lines = []
                 for n in ast.walk(ts_func):
                     if isinstance(n, ast.Assert) and not _expr_has_float_safe_guard(
@@ -2482,6 +2700,10 @@ def inspect_test_source(test_id, project_dir=None):
         "indicators": indicators,
     }
 
+
+# ============================================================================
+# SECTION 4: Runtime Cause Disambiguator
+# ============================================================================
 
 ALL_CAUSE_CATEGORIES = (
     "unseeded_randomness",

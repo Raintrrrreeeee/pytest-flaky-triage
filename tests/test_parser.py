@@ -162,3 +162,36 @@ def test_exit_code_1_crash_is_flagged(tmp_path):
     (meta,) = read_csv(out_dir / "run_meta.csv")
     assert (meta["tests_expected"], meta["tests_reported"]) == ("3", "1")
     assert "reported only 1 of 3 tests" in result.stderr
+
+
+def test_verbose_log_fallback_ignores_pre_banner_and_indented_lookalikes():
+    """BUG-02: _parse_verbose_log_fallback must ignore pre-banner text and indented stdout lookalikes."""
+    sys.path.insert(0, str(ROOT / "src"))
+    from flaky_triage.runner import _parse_verbose_log_fallback
+
+    expected_order = [
+        "test_mod.py::test_alpha",
+        "test_mod.py::test_beta[hello world]",
+    ]
+    log_text = "\n".join(
+        [
+            "test_mod.py::test_alpha PASSED",
+            "============================= test session starts ==============================",
+            "  test_mod.py::test_alpha PASSED [ 50%]",
+            "test_mod.py::test_alpha FAILED [ 50%]",
+            "    test_mod.py::test_beta[hello world] FAILED [100%]",
+            "test_mod.py::test_beta[hello world] PASSED [100%]",
+            "============================== 1 failed, 1 passed ==============================",
+            "test_mod.py::test_alpha PASSED",
+        ]
+    )
+    outcomes, positions = _parse_verbose_log_fallback(log_text, expected_order)
+    assert outcomes == {
+        "test_mod.py::test_alpha": "failed",
+        "test_mod.py::test_beta[hello world]": "passed",
+    }
+    assert positions == {
+        "test_mod.py::test_alpha": 1,
+        "test_mod.py::test_beta[hello world]": 2,
+    }
+

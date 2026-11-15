@@ -37,6 +37,7 @@ _SUMMARY_SEC_RE = re.compile(r"^=+ .* in ([0-9]+\.[0-9]+)s.*=+$")
 _VERBOSE_OUTCOME_RE = re.compile(
     r"^(.+?::.+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+.*)?$"
 )
+_START_RESULTS_BANNER_RE = re.compile(r"^=+ test session starts =+$")
 _END_RESULTS_BANNER_RE = re.compile(
     r"^=+ (?:FAILURES|ERRORS|warnings summary|short test summary info|"
     r"slowest .* durations|[0-9]+ (?:passed|failed|error|skipped|xfailed|xpassed|warnings?|deselected).* in [0-9.]+s.*) =+$"
@@ -123,11 +124,21 @@ def _parse_verbose_log_fallback(log_source, expected_ids=None):
     positions = {}
     n_reported = 0
 
+    has_start_banner = any(
+        _START_RESULTS_BANNER_RE.match(raw_line.strip()) for raw_line in lines
+    )
+    in_results = not has_start_banner
+
     for raw_line in lines:
         line = raw_line.rstrip("\r\n")
         if not line:
             continue
-        if _END_RESULTS_BANNER_RE.match(line.strip()):
+        stripped_line = line.strip()
+        if not in_results:
+            if _START_RESULTS_BANNER_RE.match(stripped_line):
+                in_results = True
+            continue
+        if _END_RESULTS_BANNER_RE.match(stripped_line):
             break
 
         matched_nid = None
@@ -143,7 +154,7 @@ def _parse_verbose_log_fallback(log_source, expected_ids=None):
                         break
                     end_pos = pos + len(token)
                     after = line[end_pos : end_pos + 1]
-                    candidate = line[:pos].strip()
+                    candidate = line[:pos].rstrip()
                     if after in ("", " ") and candidate in expected_set:
                         matched_nid = candidate
                         matched_out = mapped_out
@@ -152,10 +163,10 @@ def _parse_verbose_log_fallback(log_source, expected_ids=None):
                 if matched_nid is not None:
                     break
 
-        if matched_nid is None:
-            m = _VERBOSE_OUTCOME_RE.match(line.strip())
+        if matched_nid is None and not line[:1].isspace():
+            m = _VERBOSE_OUTCOME_RE.match(line)
             if m:
-                cand, raw_tok = m.group(1).strip(), m.group(2)
+                cand, raw_tok = m.group(1).rstrip(), m.group(2)
                 if expected_set is None or cand in expected_set:
                     matched_nid = cand
                     matched_out = _STATUS_TO_OUTCOME[raw_tok]

@@ -1,6 +1,7 @@
 """Validate diagnosis.json and render the Markdown triage report."""
 
 from collections import Counter
+import copy
 import json
 import math
 from pathlib import Path
@@ -502,6 +503,7 @@ def _item_sort_key(item):
 def generate_report(diagnosis, project_dir=None):
     """Enrich validated diagnosis data with source-based heuristic hints."""
     validate_diagnosis(diagnosis)
+    diagnosis = copy.deepcopy(diagnosis)
     runs_by_id = {r["run_id"]: r for r in diagnosis["runs"]}
     enriched_tests = []
     for test in diagnosis["tests"]:

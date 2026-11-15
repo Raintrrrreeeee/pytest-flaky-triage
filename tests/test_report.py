@@ -1994,6 +1994,205 @@ def test_report_cli_positional_and_flag_arguments(tmp_path):
     assert exc.value.code == 2
 
 
+def test_ast_ann_assign_path_and_class_instance_propagation(tmp_path):
+    """BUG-05: ast.AnnAssign tracks safe_tmp_vars, hardcoded_path_vars, and class instances identically to ast.Assign."""
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "service.py").write_text(
+        "import random\n\n"
+        "class Worker:\n"
+        "    def run_task(self) -> int:\n"
+        "        return random.randint(1, 10)\n",
+        encoding="utf-8",
+    )
+    test_file = tmp_path / "test_ann.py"
+    test_file.write_text(
+        "from pathlib import Path\n"
+        "from pkg.service import Worker\n\n"
+        "class TestAnnotated:\n"
+        "    def setup_method(self):\n"
+        "        self.worker: Worker = Worker()\n\n"
+        "    def test_safe_tmp_and_method_call(self, tmp_path: Path):\n"
+        "        out_file: Path = tmp_path / 'out.txt'\n"
+        "        out_file.write_text('hello')\n"
+        "        local_w: Worker = Worker()\n"
+        "        assert self.worker.run_task() == local_w.run_task()\n\n"
+        "    def test_hardcoded_ann_path(self):\n"
+        "        fixed_path: str = 'shared_artifact.txt'\n"
+        "        with open(fixed_path, 'w') as fh:\n"
+        "            fh.write('leak')\n",
+        encoding="utf-8",
+    )
+
+    info_safe = inspect_test_source(
+        "test_ann.py::TestAnnotated::test_safe_tmp_and_method_call", project_dir=tmp_path
+    )
+    assert info_safe["available"] is True
+    assert info_safe["indicators"]["resource_leak"] == []
+    assert any(
+        hit["side"] == "Code Side" and "pkg/service.py" in hit["location"]
+        for hit in info_safe["indicators"]["unseeded_randomness"]
+    )
+
+    info_leak = inspect_test_source(
+        "test_ann.py::TestAnnotated::test_hardcoded_ann_path", project_dir=tmp_path
+    )
+    assert len(info_leak["indicators"]["resource_leak"]) == 1
+    assert "fixed_path" not in info_leak["indicators"]["resource_leak"][0]["detail"] or (
+        "hardcoded file path" in info_leak["indicators"]["resource_leak"][0]["detail"]
+    )
+
+
+def test_ast_class_shared_state_inheritance_and_teardown_exemption(tmp_path):
+    """BUG-04: Detect Test/Code class shared state across base classes, AugAssign, cls.attr, and exempt teardown .clear()."""
+    test_file = tmp_path / "test_cls_state.py"
+    test_file.write_text(
+        "import random\n\n"
+        "GLOBAL_CACHE: dict = {}\n\n"
+        "class BaseSuite:\n"
+        "    shared_log: list = []\n"
+        "    counter: int = 0\n\n"
+        "    def inherited_helper(self):\n"
+        "        return random.random()\n\n"
+        "class TestChildSuite(BaseSuite):\n"
+        "    def teardown_method(self):\n"
+        "        self.shared_log.clear()\n"
+        "        GLOBAL_CACHE.clear()\n\n"
+        "    def test_mutates_inherited_class_state(self):\n"
+        "        self.shared_log.append('entry')\n"
+        "        TestChildSuite.counter += 1\n"
+        "        val = self.inherited_helper()\n"
+        "        assert val >= 0.0\n\n"
+        "    def test_only_teardown_clear_is_clean(self):\n"
+        "        assert True\n",
+        encoding="utf-8",
+    )
+
+    info_mut = inspect_test_source(
+        "test_cls_state.py::TestChildSuite::test_mutates_inherited_class_state",
+        project_dir=tmp_path,
+    )
+    shared_hits = info_mut["indicators"]["shared_state_interference"]
+    assert any("shared_log" in h["detail"] and h["side"] == "Test Side" for h in shared_hits)
+    assert any("counter" in h["detail"] and h["side"] == "Test Side" for h in shared_hits)
+    assert any(
+        "random.random" in h["detail"] and "inherited_helper" in h["detail"]
+        for h in info_mut["indicators"]["unseeded_randomness"]
+    )
+
+    info_clean = inspect_test_source(
+        "test_cls_state.py::TestChildSuite::test_only_teardown_clear_is_clean",
+        project_dir=tmp_path,
+    )
+    assert info_clean["indicators"]["shared_state_interference"] == []
+
+
+def test_ast_fixture_override_chains_to_parent_conftest(tmp_path):
+    """BUG-06: Same-name fixture override in test file / child conftest chains to parent conftest.py."""
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n"
+        "import random\n\n"
+        "ROOT_STATE = []\n\n"
+        "@pytest.fixture\n"
+        "def db_session():\n"
+        "    ROOT_STATE.append(random.randint(1, 100))\n"
+        "    yield ROOT_STATE\n"
+        "    ROOT_STATE.clear()\n",
+        encoding="utf-8",
+    )
+    sub_dir = tmp_path / "tests" / "sub"
+    sub_dir.mkdir(parents=True)
+    (sub_dir / "conftest.py").write_text(
+        "import pytest\n\n"
+        "@pytest.fixture\n"
+        "def db_session(db_session):\n"
+        "    return db_session\n",
+        encoding="utf-8",
+    )
+    (sub_dir / "test_override.py").write_text(
+        "import pytest\n\n"
+        "@pytest.fixture\n"
+        "def db_session(db_session):\n"
+        "    return db_session\n\n"
+        "def test_uses_overridden_fixture(db_session):\n"
+        "    assert len(db_session) >= 1\n",
+        encoding="utf-8",
+    )
+
+    info = inspect_test_source(
+        "tests/sub/test_override.py::test_uses_overridden_fixture",
+        project_dir=tmp_path,
+    )
+    assert any(
+        "conftest.py:8" in h["location"] and "random.randint" in h["detail"]
+        for h in info["indicators"]["unseeded_randomness"]
+    )
+    assert any(
+        "conftest.py:8" in h["location"] and "ROOT_STATE" in h["detail"]
+        for h in info["indicators"]["shared_state_interference"]
+    )
+    # Post-yield ROOT_STATE.clear() at line 10 must not be reported as a mutation
+    assert not any(
+        "conftest.py:10" in h["location"]
+        for h in info["indicators"]["shared_state_interference"]
+    )
+
+
+def test_ast_bare_decorator_followed_into_call_graph(tmp_path):
+    """BUG-10: Bare @decorator_name and @module.decorator_name are traversed in the call graph."""
+    (tmp_path / "decorators.py").write_text(
+        "import random\n\n"
+        "def inject_random(fn):\n"
+        "    _ = random.choice([1, 2, 3])\n"
+        "    return fn\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "test_dec.py").write_text(
+        "import decorators\n"
+        "from decorators import inject_random\n\n"
+        "@inject_random\n"
+        "def test_bare_name_decorator():\n"
+        "    assert True\n\n"
+        "@decorators.inject_random\n"
+        "def test_bare_attr_decorator():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    for test_name in ("test_bare_name_decorator", "test_bare_attr_decorator"):
+        info = inspect_test_source(f"test_dec.py::{test_name}", project_dir=tmp_path)
+        assert any(
+            "decorators.py:4" in h["location"] and "random.choice" in h["detail"]
+            for h in info["indicators"]["unseeded_randomness"]
+        ), test_name
+
+
+def test_render_markdown_and_generate_report_do_not_mutate_input(tmp_path):
+    """BUG-11 Part 1: Calling render_markdown or generate_report must not mutate caller diagnosis dict."""
+    import copy
+    from report.core import generate_report
+
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "test_rng.py").write_text(
+        "import random\n\n"
+        "def test_coin():\n"
+        "    assert random.randint(0, 1) == 0\n",
+        encoding="utf-8",
+    )
+    diagnosis = _sample_diagnosis()
+    snapshot = copy.deepcopy(diagnosis)
+    report_data = generate_report(diagnosis, project_dir=tmp_path)
+    assert diagnosis == snapshot
+    assert "resolution" not in diagnosis["tests"][0]
+    assert "resolution" in report_data["diagnosis"]["tests"][0]
+
+    md = render_markdown(diagnosis, project_dir=tmp_path)
+    assert diagnosis == snapshot
+    assert "unseeded_randomness" in md
+
+
+
 
 
 
