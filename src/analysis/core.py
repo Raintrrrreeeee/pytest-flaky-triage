@@ -51,9 +51,20 @@ def _between_values(rows, baseline=None):
     return False
 
 
+def _short_test_name(test_id: str) -> str:
+    bracket = test_id.find("[")
+    if bracket != -1:
+        prefix = test_id[:bracket]
+        suffix = test_id[bracket:]
+        short_prefix = prefix.split("::")[-1] if "::" in prefix else prefix
+        return short_prefix + suffix
+    return test_id.split("::")[-1] if "::" in test_id else test_id
+
+
 def _find_suspected_polluters(test_id, usable_rows, precedents_by_run):
-    """Identify tests that consistently preceded `test_id` when it failed in
-    full-suite runs, but did not precede it when it passed."""
+    """Identify tests that preceded `test_id` when it failed in full-suite runs,
+    using a two-stage net: (1) strict common intersection, (2) disjunctive greedy
+    hitting set over innocent-filtered candidates, and (3) fallback intersection."""
     suite_rows = [
         r for r in usable_rows
         if r["condition"] in ("repeat", "hashseed", "order", "tz")
@@ -65,29 +76,68 @@ def _find_suspected_polluters(test_id, usable_rows, precedents_by_run):
         return []
 
     fail_pred_sets = []
+    fail_pred_lists = []
     for r in failed_runs:
         preds = precedents_by_run.get((r["run_id"], test_id))
-        if preds is not None:
-            fail_pred_sets.append(preds)
+        if preds:
+            pred_list = list(preds) if isinstance(preds, (list, tuple)) else sorted(preds)
+            fail_pred_lists.append(pred_list)
+            fail_pred_sets.append(set(pred_list))
     if not fail_pred_sets:
         return []
 
-    common_on_fail = set.intersection(*fail_pred_sets)
-    if not common_on_fail:
-        return []
-
-    ever_on_pass = set()
+    pass_pred_sets = []
     always_on_pass = None
     for r in passed_runs:
-        preds = precedents_by_run.get((r["run_id"], test_id), set())
-        ever_on_pass |= preds
+        preds = set(precedents_by_run.get((r["run_id"], test_id), ()))
+        pass_pred_sets.append(preds)
         always_on_pass = set(preds) if always_on_pass is None else (always_on_pass & preds)
+    never_on_pass = set.union(*pass_pred_sets) if pass_pred_sets else set()
 
-    strict_candidates = common_on_fail - ever_on_pass
-    if strict_candidates:
-        return sorted(strict_candidates)
-    candidates = common_on_fail - (always_on_pass or set())
-    return sorted(candidates)
+    common_on_fail = set.intersection(*fail_pred_sets)
+    strict_common = common_on_fail - never_on_pass
+    if strict_common:
+        return [p for p in fail_pred_lists[0] if p in strict_common]
+
+    pool = set.union(*fail_pred_sets) - never_on_pass
+    if pool:
+        uncovered = {i for i, fset in enumerate(fail_pred_sets) if fset & pool}
+        remaining = set(pool)
+        selected = []
+        while uncovered and remaining:
+            best = min(
+                remaining,
+                key=lambda cand: (
+                    -sum(1 for i in uncovered if cand in fail_pred_sets[i]),
+                    (
+                        sum(
+                            len(fail_pred_lists[i]) - fail_pred_lists[i].index(cand)
+                            for i in uncovered
+                            if cand in fail_pred_sets[i]
+                        )
+                        / max(1, sum(1 for i in uncovered if cand in fail_pred_sets[i]))
+                    ),
+                    cand,
+                ),
+            )
+            hits = {i for i in uncovered if best in fail_pred_sets[i]}
+            if not hits:
+                break
+            selected.append(best)
+            uncovered -= hits
+            remaining.remove(best)
+        selected_set = set(selected)
+        ordered = []
+        for pred_list in fail_pred_lists:
+            for p in pred_list:
+                if p in selected_set and p not in ordered:
+                    ordered.append(p)
+        return ordered
+
+    if common_on_fail:
+        candidates = common_on_fail - (always_on_pass or set())
+        return sorted(candidates)
+    return []
 
 
 def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
@@ -169,27 +219,28 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
         else []
     )
 
-    if repeat_mixed:
-        strong_shared_signal = (order_effect and bool(polluters)) or (
-            isolation_effect
-            and (
-                bool(polluters)
-                or len(isolated) >= 2
-                or (
-                    not _mixed(hash_rows)
-                    and not _mixed(order_rows)
-                    and (len(usable) < 10 or repeat[0]["outcome"] == "passed")
-                )
-            )
+    persistent_self_pollution = (
+        len(repeat) >= 2
+        and repeat[0]["outcome"] == "passed"
+        and all(r["outcome"] in ("failed", "error") for r in repeat[1:])
+    )
+    strong_shared_signal = (
+        not repeat_mixed
+        or bool(polluters)
+        or (
+            not _mixed(hash_rows)
+            and not _mixed(order_rows)
+            and persistent_self_pollution
         )
-        if strong_shared_signal:
+    )
+
+    if repeat_mixed:
+        if (order_effect or isolation_effect) and strong_shared_signal:
             reason = (
-                "Outcomes differ across test orders, or isolated executions differ from suite executions, with a consistent repeat baseline."
-                if consumer_isolation and not (order_effect or victim_isolation)
-                else "Outcomes differ across test orders, or isolated executions pass while suite executions fail, with a consistent repeat baseline."
+                "Outcomes differ across test orders, or isolated executions pass while suite executions fail after initial state pollution."
             )
             if polluters:
-                short_p = ", ".join(p.split("::")[-1] for p in polluters[:3])
+                short_p = ", ".join(_short_test_name(p) for p in polluters[:3])
                 reason = f"{reason} Suspected polluting predecessor(s): {short_p}."
             add(
                 ["shared_state_interference"],
@@ -249,7 +300,7 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
             else "Outcomes differ across test orders, or isolated executions pass while suite executions fail, with a consistent repeat baseline."
         )
         if polluters:
-            short_p = ", ".join(p.split("::")[-1] for p in polluters[:3])
+            short_p = ", ".join(_short_test_name(p) for p in polluters[:3])
             reason = f"{reason} Suspected polluting predecessor(s): {short_p}."
         add(
             ["shared_state_interference"],
@@ -267,7 +318,7 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
 
 
 def _build_precedents_by_run(rows, runs):
-    """Map (run_id, test_id) -> set of test_ids that executed earlier in the same run."""
+    """Map (run_id, test_id) -> tuple of test_ids that executed earlier in the same run."""
     by_run = defaultdict(list)
     for row in rows:
         if row.get("position") is not None:
@@ -277,10 +328,10 @@ def _build_precedents_by_run(rows, runs):
         if runs[run_id]["condition"] == "isolated":
             continue
         pos_items.sort(key=lambda item: item[0])
-        seen_before = set()
+        seen_before = []
         for _, tid in pos_items:
-            precedents[(run_id, tid)] = set(seen_before)
-            seen_before.add(tid)
+            precedents[(run_id, tid)] = tuple(seen_before)
+            seen_before.append(tid)
     return precedents
 
 
@@ -330,7 +381,8 @@ def analyse(rows, runs):
             "evidence": observations,
         })
     totals = Counter(test["overall"]["verdict"] for test in tests)
-    # Refine multi-candidate suspected_polluters when a symmetric mutual polluter exists
+    # Refine multi-candidate suspected_polluters when a symmetric mutual polluter exists,
+    # while preserving one-way polluters required to explain uncovered failed runs.
     polluter_map = {}
     for test in tests:
         for cause in test["suspected_causes"]:
@@ -341,10 +393,47 @@ def analyse(rows, runs):
         for cause in test["suspected_causes"]:
             plist = cause.get("suspected_polluters")
             if plist and len(plist) > 1:
-                mutual = sorted(p for p in plist if tid in polluter_map.get(p, set()))
+                mutual = [p for p in plist if tid in polluter_map.get(p, set())]
                 if mutual:
-                    cause["suspected_polluters"] = mutual
-                    short_p = ", ".join(p.split("::")[-1] for p in mutual[:3])
+                    mutual_set = set(mutual)
+                    pset = set(plist)
+                    fail_fsets = []
+                    for r in test["evidence"]:
+                        rmeta = runs[r["run_id"]]
+                        if (
+                            rmeta["status"] == "ok"
+                            and rmeta["tests_reported"] == rmeta["tests_expected"]
+                            and r["outcome"] in VALID
+                            and r["outcome"] != "passed"
+                            and r["condition"] in ("repeat", "hashseed", "order", "tz")
+                            and r.get("position") is not None
+                        ):
+                            preds = precedents_by_run.get((r["run_id"], tid))
+                            if preds:
+                                fset = set(preds)
+                                if fset & pset:
+                                    fail_fsets.append(fset)
+                    uncovered_fsets = [fset for fset in fail_fsets if not (fset & mutual_set)]
+                    if not uncovered_fsets:
+                        refined = sorted(mutual)
+                    else:
+                        kept = set(mutual)
+                        rem_fsets = list(uncovered_fsets)
+                        non_mutual = [p for p in plist if p not in kept]
+                        while rem_fsets and non_mutual:
+                            best_p = max(
+                                non_mutual,
+                                key=lambda cand: sum(1 for fset in rem_fsets if cand in fset),
+                            )
+                            hits = [fset for fset in rem_fsets if best_p in fset]
+                            if not hits:
+                                break
+                            kept.add(best_p)
+                            rem_fsets = [fset for fset in rem_fsets if best_p not in fset]
+                            non_mutual.remove(best_p)
+                        refined = [p for p in plist if p in kept]
+                    cause["suspected_polluters"] = refined
+                    short_p = ", ".join(_short_test_name(p) for p in refined[:3])
                     base_reason = cause["reason"].split(" Suspected polluting predecessor(s):")[0]
                     cause["reason"] = f"{base_reason} Suspected polluting predecessor(s): {short_p}."
 

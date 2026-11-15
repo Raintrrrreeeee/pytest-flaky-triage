@@ -142,7 +142,15 @@ if [[ -f $ANSWER_KEY ]]; then
             gsub(/^"|"$/, "", line)
             gsub(/""/, "\"", line)
             name = line
-            sub(/.*::/, "", name)
+            b = index(name, "[")
+            if (b > 0) {
+                prefix = substr(name, 1, b - 1)
+                suffix = substr(name, b)
+                sub(/.*::/, "", prefix)
+                name = prefix suffix
+            } else {
+                sub(/.*::/, "", name)
+            }
             condition = $2
             if (!(name in seen)) { seen[name] = 1; order[++n_tests] = name }
             total[name, condition]++

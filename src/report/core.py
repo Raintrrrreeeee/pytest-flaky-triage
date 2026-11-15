@@ -570,6 +570,9 @@ def _translate_reason_zh(reason):
         "Outcomes differ across test orders, or isolated executions pass while suite executions fail, with a consistent repeat baseline.": (
             "重复运行基线一致，但改变测试执行顺序时结果翻转（或在套件中失败、单测隔离时通过）。"
         ),
+        "Outcomes differ across test orders, or isolated executions pass while suite executions fail after initial state pollution.": (
+            "初始状态污染后套件运行失败，但改变测试执行顺序时结果翻转（或在套件中失败、单测隔离时通过）。"
+        ),
         "Outcomes differ across test orders, or isolated executions differ from suite executions, with a consistent repeat baseline.": (
             "重复运行基线一致，但改变测试执行顺序或单测隔离运行时结果与套件运行不一致。"
         ),

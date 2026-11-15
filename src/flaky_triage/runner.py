@@ -1035,7 +1035,13 @@ def run_demo(argv=None):
         with results_csv.open(encoding="utf-8") as rstream:
             reader = csv.DictReader(rstream)
             for row in reader:
-                short = row["test_id"].split("::")[-1]
+                test_id = row["test_id"]
+                bracket = test_id.find("[")
+                if bracket != -1:
+                    prefix = test_id[:bracket]
+                    short = (prefix.split("::")[-1] if "::" in prefix else prefix) + test_id[bracket:]
+                else:
+                    short = test_id.split("::")[-1] if "::" in test_id else test_id
                 cond = row["condition"]
                 if short not in seen_names:
                     seen_names.add(short)

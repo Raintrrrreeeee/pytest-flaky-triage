@@ -492,4 +492,136 @@ def test_analysis_cli_positional_and_flag_arguments(tmp_path):
     assert exc.value.code == 2
 
 
+def test_low_freq_race_with_first_repeat_pass_not_misclassified_as_shared_state(tmp_path):
+    """BUG-03 regression: a low-frequency random/race test that passes repeat=1, fails
+    repeat=2, and passes repeat=3..10 (plus passing hashseed, order, and isolated) must
+    not be misclassified as shared_state_interference."""
+    cases = [
+        ("repeat", "1", "passed"),
+        ("repeat", "2", "failed"),
+        *[("repeat", str(i), "passed") for i in range(3, 11)],
+        ("hashseed", "1", "passed"),
+        ("hashseed", "2", "passed"),
+        ("order", "reverse", "passed"),
+        ("order", "shuffle:1", "passed"),
+        ("isolated", "alone", "passed"),
+    ]
+    path = write_matrix(tmp_path, cases, test_id="tests/test_race.py::test_low_freq_race")
+    test = read_analysis(path)["tests"][0]
+    cand_lists = [c["candidates"] for c in test["suspected_causes"]]
+    assert cand_lists == [["unseeded_randomness", "race_conditions"]]
+    assert ["shared_state_interference"] not in cand_lists
+
+
+def test_persistent_self_pollution_detected(tmp_path):
+    """BUG-03 regression: when repeat=1 passes and repeat=2..10 all fail (persistent
+    self-pollution across suite runs) while isolated passes, shared_state_interference
+    is detected without the self-contradictory 'with a consistent repeat baseline' text."""
+    cases = [
+        ("repeat", "1", "passed"),
+        *[("repeat", str(i), "failed") for i in range(2, 11)],
+        ("isolated", "alone", "passed"),
+    ]
+    path = write_matrix(tmp_path, cases, test_id="tests/test_self.py::test_self_polluter")
+    test = read_analysis(path)["tests"][0]
+    shared = [c for c in test["suspected_causes"] if c["candidates"] == ["shared_state_interference"]]
+    assert len(shared) == 1
+    assert "with a consistent repeat baseline" not in shared[0]["reason"]
+    assert "after initial state pollution" in shared[0]["reason"]
+
+
+def test_disjunctive_multi_polluters_and_one_way_polluter_preserved(tmp_path):
+    """BUG-07 regression:
+    Scenario A: two independent one-way polluters (test_polluter_a, test_polluter_b) alternate
+    preceding test_victim across failed runs; both must be identified via the disjunctive net.
+    Scenario B: when test_polluter_b is a mutual polluter with test_victim while test_polluter_a
+    is a one-way polluter that alone explains another failed run, test_polluter_a must not be
+    erased by mutual polluter refinement."""
+    # Scenario A: two one-way polluters taking turns
+    dir_a = tmp_path / "scenario_a"
+    dir_a.mkdir()
+    orders_a = [
+        (1, "repeat", "1", [("test_victim", "passed"), ("test_polluter_a", "passed"), ("test_polluter_b", "passed")]),
+        (2, "repeat", "2", [("test_victim", "passed"), ("test_polluter_a", "passed"), ("test_polluter_b", "passed")]),
+        (3, "order", "shuffle:1", [("test_polluter_a", "passed"), ("test_victim", "failed"), ("test_polluter_b", "passed")]),
+        (4, "order", "shuffle:2", [("test_polluter_b", "passed"), ("test_victim", "failed"), ("test_polluter_a", "passed")]),
+        (5, "order", "shuffle:3", [("test_victim", "passed"), ("test_polluter_a", "passed"), ("test_polluter_b", "passed")]),
+    ]
+    results_a, meta_a = [], []
+    for run_id, cond, val, seq in orders_a:
+        any_fail = any(out != "passed" for _, out in seq)
+        for pos, (tid, out) in enumerate(seq, 1):
+            results_a.append([run_id, cond, val, pos, tid, out])
+        meta_a.append([run_id, cond, val, 0, 1 if any_fail else 0, "ok", "0.02", 3, 3, f"logs/run_{run_id:03d}.log"])
+    for name, fields, data in [("results.csv", RESULT_FIELDS, results_a), ("run_meta.csv", META_FIELDS, meta_a)]:
+        with (dir_a / name).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(fields)
+            writer.writerows(data)
+    report_a = read_analysis(dir_a / "results.csv")
+    victim_a = {t["test_id"]: t for t in report_a["tests"]}["test_victim"]
+    polluters_a = victim_a["suspected_causes"][0]["suspected_polluters"]
+    assert "test_polluter_a" in polluters_a
+    assert "test_polluter_b" in polluters_a
+
+    # Scenario B: mutual polluter (test_polluter_b <-> test_victim) + one-way polluter (test_polluter_a -> test_victim)
+    dir_b = tmp_path / "scenario_b"
+    dir_b.mkdir()
+    orders_b = [
+        (1, "repeat", "1", [("test_victim", "passed"), ("test_polluter_b", "failed"), ("test_polluter_a", "passed")]),
+        (2, "repeat", "2", [("test_victim", "passed"), ("test_polluter_b", "failed"), ("test_polluter_a", "passed")]),
+        (3, "order", "shuffle:1", [("test_polluter_a", "passed"), ("test_victim", "failed"), ("test_polluter_b", "failed")]),
+        (4, "order", "shuffle:2", [("test_polluter_b", "passed"), ("test_victim", "failed"), ("test_polluter_a", "passed")]),
+        (5, "order", "shuffle:3", [("test_victim", "passed"), ("test_polluter_a", "passed"), ("test_polluter_b", "failed")]),
+    ]
+    results_b, meta_b = [], []
+    for run_id, cond, val, seq in orders_b:
+        any_fail = any(out != "passed" for _, out in seq)
+        for pos, (tid, out) in enumerate(seq, 1):
+            results_b.append([run_id, cond, val, pos, tid, out])
+        meta_b.append([run_id, cond, val, 0, 1 if any_fail else 0, "ok", "0.02", 3, 3, f"logs/run_{run_id:03d}.log"])
+    for name, fields, data in [("results.csv", RESULT_FIELDS, results_b), ("run_meta.csv", META_FIELDS, meta_b)]:
+        with (dir_b / name).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(fields)
+            writer.writerows(data)
+    report_b = read_analysis(dir_b / "results.csv")
+    tests_b = {t["test_id"]: t for t in report_b["tests"]}
+    victim_b = tests_b["test_victim"]
+    polluters_b = victim_b["suspected_causes"][0]["suspected_polluters"]
+    assert "test_polluter_a" in polluters_b
+    assert "test_polluter_b" in polluters_b
+
+
+def test_parameterized_polluter_name_with_double_colon_not_truncated(tmp_path):
+    """BUG-09 regression: parameterized polluter test IDs containing '::' inside brackets
+    must preserve the full function and parameter suffix in reason strings."""
+    polluter_id = "tests/test_mod.py::test_polluter[ns::key]"
+    victim_id = "tests/test_mod.py::test_victim"
+    results = [
+        [1, "repeat", "1", 1, victim_id, "passed"],
+        [1, "repeat", "1", 2, polluter_id, "passed"],
+        [2, "repeat", "2", 1, victim_id, "passed"],
+        [2, "repeat", "2", 2, polluter_id, "passed"],
+        [3, "order", "reverse", 1, polluter_id, "passed"],
+        [3, "order", "reverse", 2, victim_id, "failed"],
+    ]
+    metadata = [
+        [1, "repeat", "1", 0, 0, "ok", "0.02", 2, 2, "logs/run_001.log"],
+        [2, "repeat", "2", 0, 0, "ok", "0.02", 2, 2, "logs/run_002.log"],
+        [3, "order", "reverse", 0, 1, "ok", "0.02", 2, 2, "logs/run_003.log"],
+    ]
+    for name, fields, data in [("results.csv", RESULT_FIELDS, results), ("run_meta.csv", META_FIELDS, metadata)]:
+        with (tmp_path / name).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(fields)
+            writer.writerows(data)
+    report = read_analysis(tmp_path / "results.csv")
+    victim = {t["test_id"]: t for t in report["tests"]}[victim_id]
+    reason = victim["suspected_causes"][0]["reason"]
+    assert "Suspected polluting predecessor(s): test_polluter[ns::key]." in reason
+    assert "Suspected polluting predecessor(s): key]." not in reason
+
+
+
 
