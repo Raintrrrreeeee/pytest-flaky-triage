@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import pytest
 
-from report import (
+from pytest_flaky_triage_report import (
     ReportContractError,
     disambiguate_causes,
     generate_report,
@@ -15,7 +15,7 @@ from report import (
     load_diagnosis,
     render_markdown,
 )
-from report.__main__ import main
+from pytest_flaky_triage_report.__main__ import main
 
 
 def _counts(passed=0, failed=0, error=0, skipped=0, xfailed=0, xpassed=0, timeout=0, not_run=0):
@@ -1042,7 +1042,7 @@ def test_render_markdown_handles_nullable_scores_warnings_and_no_project():
 
 def test_supplied_analysis_fixture_and_duplicate_short_names():
     """Verify report generation on the 21-test analysis fixture and disambiguated duplicate leaf names."""
-    from analysis import analyse, load_records
+    from pytest_flaky_triage_analysis import analyse, load_records
 
     fixture_dir = Path(__file__).resolve().parent / "fixtures" / "analysis"
     diagnosis = analyse(*load_records(fixture_dir / "results.csv", fixture_dir / "run_meta.csv"))
@@ -1098,7 +1098,7 @@ def test_cli_exit_codes_and_atomic_write(tmp_path):
 
     # Exit code 2 via subprocess when arguments are missing
     proc = subprocess.run(
-        [sys.executable, "-m", "report"],
+        [sys.executable, "-m", "pytest_flaky_triage_report"],
         env={"PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
         capture_output=True,
         text=True,
@@ -2175,7 +2175,7 @@ def test_ast_bare_decorator_followed_into_call_graph(tmp_path):
 def test_render_markdown_and_generate_report_do_not_mutate_input(tmp_path):
     """BUG-11 Part 1: Calling render_markdown or generate_report must not mutate caller diagnosis dict."""
     import copy
-    from report.core import generate_report
+    from pytest_flaky_triage_report.core import generate_report
 
     (tmp_path / "tests").mkdir(exist_ok=True)
     (tmp_path / "tests" / "test_rng.py").write_text(
@@ -2198,16 +2198,16 @@ def test_render_markdown_and_generate_report_do_not_mutate_input(tmp_path):
 
 def test_modular_heuristics_facade_and_ast_cache_invalidation(tmp_path):
     """Verify submodule exports match heuristics facade and _parse_file invalidates cache on file edit."""
-    from report.ast_utils import _parse_file as parse_direct
-    from report.disambiguator import disambiguate_causes as disambiguate_direct
-    from report.heuristics import (
+    from pytest_flaky_triage_report.ast_utils import _parse_file as parse_direct
+    from pytest_flaky_triage_report.disambiguator import disambiguate_causes as disambiguate_direct
+    from pytest_flaky_triage_report.heuristics import (
         _parse_file as parse_facade,
         _scan_function_signals as scan_facade,
         disambiguate_causes as disambiguate_facade,
         inspect_test_source as inspect_facade,
     )
-    from report.inspector import inspect_test_source as inspect_direct
-    from report.signals import _scan_function_signals as scan_direct
+    from pytest_flaky_triage_report.inspector import inspect_test_source as inspect_direct
+    from pytest_flaky_triage_report.signals import _scan_function_signals as scan_direct
 
     assert inspect_facade is inspect_direct
     assert disambiguate_facade is disambiguate_direct
@@ -2236,6 +2236,99 @@ def test_modular_heuristics_facade_and_ast_cache_invalidation(tmp_path):
     second_info = inspect_facade("test_cache_mod.py::test_dynamic", project_dir=tmp_path)
     assert second_info["indicators"]["unseeded_randomness"] == []
     assert len(second_info["indicators"]["timezone_sensitivity"]) == 1
+
+
+def test_ast_direct_global_read_and_polluter_scanning(tmp_path):
+    """Task 7: Verify direct ast.Name reads of mutable/mutated globals and same-file suspected_polluters
+    resolve shared_state_interference fault_side to Test Side instead of Undetermined, while upper-case
+    immutable constants are ignored."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_global_read.py").write_text(
+        "MAX_LIMIT = 10\n"
+        "COUNTER = 0\n"
+        "shared_state_flag = False\n"
+        "SHARED_ITEMS = []\n\n"
+        "def test_polluter_mutates_counter():\n"
+        "    global COUNTER, shared_state_flag\n"
+        "    COUNTER += 1\n"
+        "    shared_state_flag = True\n\n"
+        "def test_victim_reads_counter_directly():\n"
+        "    assert COUNTER == 0\n\n"
+        "def test_victim_reads_lowercase_global():\n"
+        "    assert not shared_state_flag\n\n"
+        "def test_victim_reads_mutable_upper_container():\n"
+        "    assert SHARED_ITEMS == []\n\n"
+        "def test_reads_only_immutable_upper_constant():\n"
+        "    assert MAX_LIMIT == 10\n\n"
+        "def test_victim_relies_on_polluter_scan():\n"
+        "    assert MAX_LIMIT == 10\n",
+        encoding="utf-8",
+    )
+
+    shared_cause = [
+        {
+            "candidates": ["shared_state_interference"],
+            "status": "suspected",
+            "reason": "Outcomes differ across test orders, or isolated executions pass while suite executions fail, with a consistent repeat baseline. Suspected polluting predecessor(s): test_polluter_mutates_counter.",
+            "run_ids": [1, 2],
+            "suspected_polluters": ["tests/test_global_read.py::test_polluter_mutates_counter"],
+        }
+    ]
+
+    # 1. Direct read of UPPER_CASE scalar that is mutated via global in the same file
+    info_counter = inspect_test_source(
+        "tests/test_global_read.py::test_victim_reads_counter_directly",
+        project_dir=tmp_path,
+    )
+    res_counter = disambiguate_causes(copy.deepcopy(shared_cause), info_counter)
+    assert res_counter["fault_side"] == "Test Side"
+    assert any("COUNTER" in h["detail"] for h in info_counter["indicators"]["shared_state_interference"])
+
+    # 2. Direct read of lowercase module global
+    info_lower = inspect_test_source(
+        "tests/test_global_read.py::test_victim_reads_lowercase_global",
+        project_dir=tmp_path,
+    )
+    res_lower = disambiguate_causes(copy.deepcopy(shared_cause), info_lower)
+    assert res_lower["fault_side"] == "Test Side"
+    assert any("shared_state_flag" in h["detail"] for h in info_lower["indicators"]["shared_state_interference"])
+
+    # 3. Direct read of UPPER_CASE mutable container
+    info_container = inspect_test_source(
+        "tests/test_global_read.py::test_victim_reads_mutable_upper_container",
+        project_dir=tmp_path,
+    )
+    res_container = disambiguate_causes(copy.deepcopy(shared_cause), info_container)
+    assert res_container["fault_side"] == "Test Side"
+    assert any("SHARED_ITEMS" in h["detail"] for h in info_container["indicators"]["shared_state_interference"])
+
+    # 4. Reading an unmutated UPPER_CASE scalar constant without polluters does NOT trigger a false positive
+    info_const = inspect_test_source(
+        "tests/test_global_read.py::test_reads_only_immutable_upper_constant",
+        project_dir=tmp_path,
+    )
+    assert info_const["indicators"]["shared_state_interference"] == []
+
+    # 5. Victim with no direct signal itself still gets Test Side attribution via suspected_polluters scan
+    info_via_polluter = inspect_test_source(
+        "tests/test_global_read.py::test_victim_relies_on_polluter_scan",
+        project_dir=tmp_path,
+        suspected_polluters=["tests/test_global_read.py::test_polluter_mutates_counter"],
+    )
+    res_via_polluter = disambiguate_causes(copy.deepcopy(shared_cause), info_via_polluter)
+    assert res_via_polluter["fault_side"] == "Test Side"
+    assert any(
+        "COUNTER" in h["detail"]
+        for h in info_via_polluter["indicators"]["shared_state_interference"]
+    )
+
+    # 6. Full generate_report pipeline passes suspected_polluters into inspect_test_source
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/test_global_read.py::test_victim_relies_on_polluter_scan"
+    diag["tests"][1]["suspected_causes"] = copy.deepcopy(shared_cause)
+    report_data = generate_report(diag, project_dir=tmp_path)
+    assert report_data["diagnosis"]["tests"][1]["resolution"]["fault_side"] == "Test Side"
 
 
 

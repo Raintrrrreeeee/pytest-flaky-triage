@@ -32,12 +32,13 @@ function rank(o) {
 }
 
 BEGIN {
-    n_status = split("PASSED FAILED ERROR SKIPPED XFAIL XPASS", status_word, " ")
+    n_status = split("PASSED FAILED ERROR SKIPPED XFAIL XPASS(strict) XPASS", status_word, " ")
     outcome_for["PASSED"] = "passed"
     outcome_for["FAILED"] = "failed"
     outcome_for["ERROR"]  = "error"
     outcome_for["SKIPPED"] = "skipped"
     outcome_for["XFAIL"]  = "xfailed"
+    outcome_for["XPASS(strict)"] = "xpassed"
     outcome_for["XPASS"]  = "xpassed"
     n_expected = 0
     n_reported = 0
@@ -57,7 +58,31 @@ FNR == NR {
 # "test session starts" banner and the next pytest section banner (FAILURES,
 # ERRORS, warnings summary, short test summary, or final summary).
 { sub(/\r$/, "") }
-results_done { next }
+results_done {
+    if (index($0, "[XPASS(strict)]") > 0) {
+        matched_xpass = 0
+        for (nid in outcome) {
+            if (outcome[nid] == "failed" && index($0, nid) > 0) {
+                outcome[nid] = "xpassed"
+                matched_xpass = 1
+            }
+        }
+        if (!matched_xpass) {
+            n_failed = 0
+            only_failed = ""
+            for (nid in outcome) {
+                if (outcome[nid] == "failed") {
+                    n_failed++
+                    only_failed = nid
+                }
+            }
+            if (n_failed == 1) {
+                outcome[only_failed] = "xpassed"
+            }
+        }
+    }
+    next
+}
 !in_results {
     if ($0 ~ /^=+ test session starts =+$/) in_results = 1
     next

@@ -104,8 +104,8 @@ def test_parse_verbose_log_fallback_supports_spaces_in_test_paths(tmp_path):
     assert rows[4] == '1,repeat,"1",,"tests/sub dir/test_space.py::test_missing",not_run'
 
 
-def test_runner_cleans_up_temp_files_on_keyboard_interrupt(tmp_path, monkeypatch):
-    """runner.run_detect must clean up .tmp_run_*, collected.tmp, single.txt, and smart_isolated.txt on Ctrl+C."""
+def test_runner_cleans_up_temp_files_on_keyboard_interrupt(tmp_path, monkeypatch, capsys):
+    """runner.run_detect must clean up .tmp_run_*, collected.tmp, single.txt, and smart_isolated.txt on Ctrl+C and return 130."""
     proj = tmp_path / "proj"
     (proj / "tests").mkdir(parents=True)
     (proj / "tests" / "test_sample.py").write_text(
@@ -130,21 +130,26 @@ def test_runner_cleans_up_temp_files_on_keyboard_interrupt(tmp_path, monkeypatch
 
     monkeypatch.setattr(runner, "_run_subprocess_with_timeout", interrupt_on_isolated)
 
-    with pytest.raises(KeyboardInterrupt):
-        runner.run_detect(
-            [
-                "--project", str(proj),
-                "--out", str(out_dir),
-                "--repeats", "1",
-                "--hash-seeds", "",
-                "--orders", "0",
-                "--timezones", "",
-                "--isolated", "1",
-                "--isolated-scope", "smart",
-                "--no-report",
-                "--python", sys.executable,
-            ]
-        )
+    rc = runner.run_detect(
+        [
+            "--project", str(proj),
+            "--out", str(out_dir),
+            "--repeats", "1",
+            "--hash-seeds", "",
+            "--orders", "0",
+            "--timezones", "",
+            "--isolated", "1",
+            "--isolated-scope", "smart",
+            "--no-report",
+            "--python", sys.executable,
+        ]
+    )
+    assert rc == 130
+    captured = capsys.readouterr()
+    assert (
+        f"Interrupted by user (Ctrl+C). Partial logs and results (if any) are in {out_dir}. "
+        "To resume or inspect existing data without re-running pytest, use --report-only."
+    ) in captured.err
 
     assert list(out_dir.glob(".tmp_run_*")) == []
     assert not (out_dir / "collected.tmp").exists()
@@ -189,6 +194,11 @@ def test_detect_sh_and_runner_smart_isolated_run_counts(tmp_path, capsys):
             "collected 3 tests; planned up to 5 runs (2 suite runs + smart isolated for failing tests; timeout 60s each)"
             in res.stderr
         )
+        assert "[run 1/5] repeat (1) finished in " in res.stderr
+        assert (
+            "smart isolated scope: selected 1 failing test(s) for isolated verification (1 isolated runs)..."
+            in res.stderr
+        )
         assert "isolated: 1 runs done" in res.stderr
         assert "finished 3 runs in " in res.stderr
 
@@ -211,6 +221,11 @@ def test_detect_sh_and_runner_smart_isolated_run_counts(tmp_path, capsys):
     captured = capsys.readouterr()
     assert (
         "collected 3 tests; planned up to 5 runs (2 suite runs + smart isolated for failing tests; timeout 60s each)"
+        in captured.err
+    )
+    assert "[run 1/5] repeat (1) finished in " in captured.err
+    assert (
+        "smart isolated scope: selected 1 failing test(s) for isolated verification (1 isolated runs)..."
         in captured.err
     )
     assert "isolated: 1 runs done" in captured.err
@@ -245,3 +260,18 @@ def test_run_demo_fallback_path_matches_demo_sh(tmp_path, monkeypatch):
     rc = runner.run_demo(["--out", str(out_dir), "--no-report"])
     assert rc == 0
     assert called["argv"][:2] == ["--project", str(REPO_ROOT / "scenario")]
+
+
+def test_namespaced_top_level_packages_avoid_bare_analysis_and_report():
+    """Task 6: Top-level packages in src/ and pyproject.toml must use pytest_flaky_triage_* namespace."""
+    import pytest_flaky_triage_analysis
+    import pytest_flaky_triage_report
+
+    assert hasattr(pytest_flaky_triage_analysis, "analyse")
+    assert hasattr(pytest_flaky_triage_report, "generate_report")
+    assert not (REPO_ROOT / "src" / "analysis").exists()
+    assert not (REPO_ROOT / "src" / "report").exists()
+    pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "pytest_flaky_triage_analysis" in pyproject_text
+    assert "pytest_flaky_triage_report" in pyproject_text
+

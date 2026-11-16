@@ -1,4 +1,4 @@
-"""CLI contract: python -m analysis [RESULTS_CSV] [OUTPUT_DIR] [--results PATH] [--run-meta PATH] [--out PATH]."""
+"""CLI contract: python -m pytest_flaky_triage_analysis [RESULTS_CSV] [OUTPUT_DIR] [--results PATH] [--run-meta PATH] [--out PATH]."""
 
 import argparse
 import csv

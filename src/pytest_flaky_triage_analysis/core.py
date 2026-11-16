@@ -79,11 +79,11 @@ def _find_suspected_polluters(test_id, usable_rows, precedents_by_run):
     fail_pred_lists = []
     for r in failed_runs:
         preds = precedents_by_run.get((r["run_id"], test_id))
-        if preds:
+        if preds is not None:
             pred_list = list(preds) if isinstance(preds, (list, tuple)) else sorted(preds)
             fail_pred_lists.append(pred_list)
             fail_pred_sets.append(set(pred_list))
-    if not fail_pred_sets:
+    if not fail_pred_sets or not any(fail_pred_sets):
         return []
 
     pass_pred_sets = []
@@ -100,8 +100,8 @@ def _find_suspected_polluters(test_id, usable_rows, precedents_by_run):
         return [p for p in fail_pred_lists[0] if p in strict_common]
 
     pool = set.union(*fail_pred_sets) - never_on_pass
-    if pool:
-        uncovered = {i for i, fset in enumerate(fail_pred_sets) if fset & pool}
+    if pool and all(bool(fset & pool) for fset in fail_pred_sets):
+        uncovered = set(range(len(fail_pred_sets)))
         remaining = set(pool)
         selected = []
         while uncovered and remaining:
@@ -134,7 +134,8 @@ def _find_suspected_polluters(test_id, usable_rows, precedents_by_run):
                     ordered.append(p)
         return ordered
 
-    if common_on_fail:
+    same_order_mixed = any(fset in pass_pred_sets for fset in fail_pred_sets)
+    if common_on_fail and not same_order_mixed:
         candidates = common_on_fail - (always_on_pass or set())
         return sorted(candidates)
     return []
@@ -231,6 +232,7 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
         len(repeat) >= 2
         and repeat[0]["outcome"] == "passed"
         and all(r["outcome"] in ("failed", "error") for r in repeat[1:])
+        and all(r["outcome"] in ("failed", "error") for r in hash_rows + order_rows + tz_rows)
     )
     strong_shared_signal = (
         (not repeat_mixed and not iso_mixed)

@@ -52,6 +52,7 @@ pytest-flaky-triage = "flaky_triage.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["flaky_triage*", "pytest_flaky_triage_analysis*", "pytest_flaky_triage_report*"]
 
 [tool.setuptools.package-data]
 flaky_triage = ["runtime/*.sh", "runtime/lib/*"]

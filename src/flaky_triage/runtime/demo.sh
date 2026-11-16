@@ -103,7 +103,7 @@ fi
 
 heading "The problem: the same suite, no code changes, run twice with plain pytest"
 for attempt in 1 2; do
-    summary=$(cd "$SCENARIO" && "$PYTHON" -m pytest -q -p no:randomly -p no:cacheprovider < /dev/null 2>&1 | tail -n 1 || true)
+    summary=$(cd "$SCENARIO" && "$PYTHON" -m pytest -q -o addopts="" -p no:randomly -p no:cacheprovider < /dev/null 2>&1 | tail -n 1 || true)
     echo "  run $attempt: $summary"
 done
 echo "  Which failures are real bugs, which are flaky, and why? Plain pytest cannot say."

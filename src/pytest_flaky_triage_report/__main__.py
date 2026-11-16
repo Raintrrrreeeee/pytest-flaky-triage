@@ -1,4 +1,4 @@
-"""CLI contract: python -m report [DIAGNOSIS_JSON] [OUTPUT_DIR] [--diagnosis PATH] [--out PATH] [--project PROJECT_DIR] [--lang {en,zh}]."""
+"""CLI contract: python -m pytest_flaky_triage_report [DIAGNOSIS_JSON] [OUTPUT_DIR] [--diagnosis PATH] [--out PATH] [--project PROJECT_DIR] [--lang {en,zh}]."""
 
 import argparse
 import json

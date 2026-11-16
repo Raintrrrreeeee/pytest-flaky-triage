@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from analysis import InputError, analyse, load_records
-from analysis.__main__ import main
-from analysis.records import META_FIELDS, RESULT_FIELDS
+from pytest_flaky_triage_analysis import InputError, analyse, load_records
+from pytest_flaky_triage_analysis.__main__ import main
+from pytest_flaky_triage_analysis.records import META_FIELDS, RESULT_FIELDS
 
 
 def write_matrix(tmp_path, cases, test_id='test example.py::test_value[a, "b"]'):
@@ -88,7 +88,7 @@ def test_analysis_verdicts_and_score(tmp_path, outcomes, verdict, score):
     ([("repeat", "1", "failed"), ("repeat", "2", "failed"), ("isolated", "alone", "passed")], [["shared_state_interference"]]),
     ([("repeat", "1", "passed"), ("repeat", "2", "passed"), ("isolated", "alone", "failed")], [["shared_state_interference"]]),
     ([("repeat", "1", "passed"), ("repeat", "2", "passed"), ("tz", "UTC", "passed"), ("tz", "Pacific/Kiritimati", "failed")], [["timezone_sensitivity"]]),
-    ([("repeat", "1", "passed"), ("repeat", "2", "passed"), ("repeat", "3", "passed"), ("repeat", "4", "passed"), ("repeat", "5", "passed"), ("tz", "UTC", "passed"), ("tz", "Pacific/Kiritimati", "failed"), ("tz", "America/Pago_Pago", "passed")], [["timezone_sensitivity"]]),
+    ([("repeat", "1", "passed"), ("repeat", "2", "passed"), ("repeat", "3", "passed"), ("repeat", "4", "passed"), ("repeat", "5", "passed"), ("tz", "UTC", "passed"), ("tz", "Pacific/Kiritimati", "failed"), ("tz", "Pacific/Pago_Pago", "passed")], [["timezone_sensitivity"]]),
     ([("repeat", "1", "passed"), ("repeat", "2", "passed"), ("repeat", "3", "passed"), ("repeat", "4", "passed"), ("repeat", "5", "passed"), ("hashseed", "1", "passed"), ("hashseed", "2", "failed"), ("tz", "UTC", "passed"), ("tz", "Pacific/Kiritimati", "failed")], [["unseeded_randomness", "race_conditions"]]),
     ([("repeat", "1", "passed"), ("repeat", "2", "failed"), ("hashseed", "1", "passed"), ("hashseed", "2", "failed"), ("order", "reverse", "failed"), ("isolated", "alone", "passed")], [["unseeded_randomness", "race_conditions"]]),
     ([("hashseed", "1", "passed"), ("hashseed", "2", "failed")], []),
@@ -272,7 +272,7 @@ def test_analysis_failed_output_replacement_keeps_previous_result(tmp_path, monk
     def fail_replace(*args):
         raise OSError("simulated output replacement failure")
 
-    monkeypatch.setattr("analysis.__main__.os.replace", fail_replace)
+    monkeypatch.setattr("pytest_flaky_triage_analysis.__main__.os.replace", fail_replace)
     assert main([str(path), str(output)]) == 5
     assert (output / "diagnosis.json").read_bytes() == previous
     assert not list(output.glob(".diagnosis-*.tmp"))
@@ -692,6 +692,50 @@ def test_parameterized_polluter_name_with_double_colon_not_truncated(tmp_path):
     reason = victim["suspected_causes"][0]["reason"]
     assert "Suspected polluting predecessor(s): test_polluter[ns::key]." in reason
     assert "Suspected polluting predecessor(s): key]." not in reason
+
+
+def test_random_test_flipping_in_repeat_and_passing_isolated_not_misclassified_as_shared_state(tmp_path):
+    """Task 8.1 regression: a random/race test that flips during repeat (under the exact same
+    predecessor set) and happens to pass in isolated runs (or fail in some shuffled orders
+    after another test) must NOT be misclassified as shared_state_interference."""
+    results = [
+        # repeat 1: passes at pos 1
+        [1, "repeat", "1", 1, "test_random_flaky", "passed"],
+        [1, "repeat", "1", 2, "test_bystander", "passed"],
+        # repeat 2: fails at pos 1 (same empty predecessor set as repeat 1!)
+        [2, "repeat", "2", 1, "test_random_flaky", "failed"],
+        [2, "repeat", "2", 2, "test_bystander", "passed"],
+        # hashseed runs: mixed
+        [3, "hashseed", "1", 1, "test_random_flaky", "passed"],
+        [3, "hashseed", "1", 2, "test_bystander", "passed"],
+        [4, "hashseed", "2", 1, "test_random_flaky", "failed"],
+        [4, "hashseed", "2", 2, "test_bystander", "passed"],
+        # order reverse: test_bystander precedes test_random_flaky, which happens to fail
+        [5, "order", "reverse", 1, "test_bystander", "passed"],
+        [5, "order", "reverse", 2, "test_random_flaky", "failed"],
+        # isolated runs: happens to pass
+        [6, "isolated", "alone", 1, "test_random_flaky", "passed"],
+        [7, "isolated", "alone", 1, "test_random_flaky", "passed"],
+    ]
+    metadata = [
+        [1, "repeat", "1", 0, 0, "ok", "0.02", 2, 2, "logs/run_001.log"],
+        [2, "repeat", "2", 0, 1, "ok", "0.02", 2, 2, "logs/run_002.log"],
+        [3, "hashseed", "1", 1, 0, "ok", "0.02", 2, 2, "logs/run_003.log"],
+        [4, "hashseed", "2", 2, 1, "ok", "0.02", 2, 2, "logs/run_004.log"],
+        [5, "order", "reverse", 0, 1, "ok", "0.02", 2, 2, "logs/run_005.log"],
+        [6, "isolated", "alone", 0, 0, "ok", "0.01", 1, 1, "logs/run_006.log"],
+        [7, "isolated", "alone", 0, 0, "ok", "0.01", 1, 1, "logs/run_007.log"],
+    ]
+    for name, fields, data in [("results.csv", RESULT_FIELDS, results), ("run_meta.csv", META_FIELDS, metadata)]:
+        with (tmp_path / name).open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(fields)
+            writer.writerows(data)
+    report = read_analysis(tmp_path / "results.csv")
+    flaky = {t["test_id"]: t for t in report["tests"]}["test_random_flaky"]
+    causes = [c["candidates"] for c in flaky["suspected_causes"]]
+    assert causes == [["unseeded_randomness", "race_conditions"]]
+
 
 
 

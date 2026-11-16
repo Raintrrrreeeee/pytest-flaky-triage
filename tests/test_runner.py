@@ -373,5 +373,295 @@ def test_intensive_preset_and_isolated_runs(tmp_path):
     assert len({r["run_id"] for r in iso_b}) == 2
 
 
+def _run_both_engines(args):
+    """Run detect with both Pure Python runner and (on POSIX) Bash detect.sh."""
+    outcomes = []
+    env_py = os.environ.copy()
+    env_py["FLAKY_PURE_PYTHON"] = "1"
+    env_py["FLAKY_CLI_NAME"] = "scripts/detect.sh"
+    env_py["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT / "src"), *([env_py["PYTHONPATH"]] if env_py.get("PYTHONPATH") else [])]
+    )
+    outcomes.append(
+        (
+            "python",
+            subprocess.run(
+                [sys.executable, "-m", "flaky_triage.cli", *args],
+                env=env_py,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            ),
+        )
+    )
+    if os.name != "nt":
+        outcomes.append(
+            (
+                "bash",
+                subprocess.run(
+                    ["bash", str(DETECT), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                ),
+            )
+        )
+    return outcomes
+
+
+def test_task1_addopts_override_ignores_hostile_project_config(tmp_path):
+    """Task 1: -o addopts="" shields collection and matrix runs from hostile project addopts."""
+    proj = tmp_path / "hostile_addopts_proj"
+    (proj / "tests").mkdir(parents=True)
+    (proj / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\naddopts = "-n auto --cov=nonexistent --strict-config --unknown-xyz-flag"\n',
+        encoding="utf-8",
+    )
+    (proj / "tests" / "test_ok.py").write_text(
+        "def test_ok():\n    assert 1 + 1 == 2\n",
+        encoding="utf-8",
+    )
+    for engine, res in _run_both_engines(
+        [
+            "--project", str(proj),
+            "--out", str(tmp_path / f"out_{os.getpid()}" / "run"),
+            "--repeats", "1",
+            "--hash-seeds", "",
+            "--orders", "0",
+            "--timezones", "",
+            "--isolated", "0",
+            "--no-report",
+        ]
+    ):
+        assert res.returncode == 0, f"{engine} failed: {res.stderr}"
+
+
+def test_task2_timezone_validation_and_pacific_pago_pago_default(tmp_path):
+    """Task 2: Invalid IANA timezones (including America/Pago_Pago) exit with 2, and default uses Pacific/Pago_Pago."""
+    import csv
+
+    for bad_tz in ("America/Pago_Pago", "Mars/Olympus_Mons"):
+        for engine, res in _run_both_engines(
+            [
+                "--project", GOOD_PROJECT,
+                "--out", str(tmp_path / f"bad_tz_{bad_tz.replace('/', '_')}"),
+                "--timezones", f"UTC {bad_tz}",
+                "--no-report",
+            ]
+        ):
+            assert res.returncode == 2, f"{engine} did not reject {bad_tz}"
+            assert "--timezones values must be valid timezone identifiers" in res.stderr
+            assert bad_tz in res.stderr
+
+    proj = tmp_path / "tz_proj"
+    (proj / "tests").mkdir(parents=True)
+    (proj / "tests" / "test_tz.py").write_text("def test_pass():\n    assert True\n", encoding="utf-8")
+    for engine in ("python", *(["bash"] if os.name != "nt" else [])):
+        out_dir = tmp_path / f"tz_default_{engine}"
+        args = [
+            "--project", str(proj),
+            "--out", str(out_dir),
+            "--repeats", "1",
+            "--hash-seeds", "",
+            "--orders", "0",
+            "--isolated", "0",
+            "--no-report",
+        ]
+        if engine == "python":
+            env_py = {**os.environ, "FLAKY_PURE_PYTHON": "1", "PYTHONPATH": str(ROOT / "src")}
+            res = subprocess.run(
+                [sys.executable, "-m", "flaky_triage.cli", *args],
+                env=env_py,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        else:
+            res = subprocess.run(["bash", str(DETECT), *args], capture_output=True, text=True, timeout=120)
+        assert res.returncode == 0, f"{engine}: {res.stderr}"
+        with (out_dir / "run_meta.csv").open(encoding="utf-8") as fh:
+            meta_rows = list(csv.DictReader(fh))
+        tz_values = [r["condition_value"] for r in meta_rows if r["condition"] == "tz"]
+        assert tz_values == ["UTC", "Pacific/Kiritimati", "Pacific/Pago_Pago"]
+
+
+def test_task3_trylast_collection_respects_k_and_m_filters(tmp_path):
+    """Task 3: -k and -m filters run before flaky_plugin records FLAKY_COLLECT_FILE."""
+    import csv
+
+    proj = tmp_path / "filter_proj"
+    (proj / "tests").mkdir(parents=True)
+    (proj / "tests" / "test_filter.py").write_text(
+        "def test_alpha():\n    assert True\n\n"
+        "def test_beta():\n    assert True\n\n"
+        "def test_gamma():\n    assert True\n",
+        encoding="utf-8",
+    )
+    for engine in ("python", *(["bash"] if os.name != "nt" else [])):
+        out_dir = tmp_path / f"filter_out_{engine}"
+        args = [
+            "--project", str(proj),
+            "--out", str(out_dir),
+            "--repeats", "2",
+            "--hash-seeds", "",
+            "--orders", "0",
+            "--timezones", "",
+            "--isolated", "0",
+            "-k", "test_alpha",
+            "--no-report",
+        ]
+        if engine == "python":
+            env_py = {**os.environ, "FLAKY_PURE_PYTHON": "1", "PYTHONPATH": str(ROOT / "src")}
+            res = subprocess.run(
+                [sys.executable, "-m", "flaky_triage.cli", *args],
+                env=env_py,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        else:
+            res = subprocess.run(["bash", str(DETECT), *args], capture_output=True, text=True, timeout=120)
+        assert res.returncode == 0, f"{engine}: {res.stderr}"
+        collected = (out_dir / "collected.txt").read_text(encoding="utf-8").splitlines()
+        assert collected == ["tests/test_filter.py::test_alpha"]
+        with (out_dir / "run_meta.csv").open(encoding="utf-8") as fh:
+            meta = list(csv.DictReader(fh))
+        assert all(r["tests_expected"] == "1" and r["tests_reported"] == "1" for r in meta)
+        with (out_dir / "results.csv").open(encoding="utf-8") as fh:
+            results = list(csv.DictReader(fh))
+        assert all(r["test_id"] == "tests/test_filter.py::test_alpha" for r in results)
+        assert all(r["outcome"] == "passed" for r in results)
+
+
+def test_task4_strict_xpass_recorded_as_xpassed_and_skipped_by_smart_isolated(tmp_path):
+    """Task 4: @pytest.mark.xfail(strict=True) XPASS is recorded as xpassed, excluded from smart isolated,
+    and default --isolated-runs is 2 when a real failure occurs."""
+    import csv
+    from flaky_triage import runner
+
+    proj = tmp_path / "xfail_proj"
+    (proj / "tests").mkdir(parents=True)
+    (proj / "tests" / "test_xfail.py").write_text(
+        "import pytest\n\n"
+        "@pytest.mark.xfail(strict=True, reason='strict xpass case')\n"
+        "def test_strict_xpass():\n"
+        "    assert True\n\n"
+        "@pytest.mark.xfail(strict=False, reason='normal xfail case')\n"
+        "def test_normal_xfail():\n"
+        "    assert False\n\n"
+        "def test_normal_pass():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+    for engine in ("python", *(["bash"] if os.name != "nt" else [])):
+        out_dir = tmp_path / f"xfail_out_{engine}"
+        args = [
+            "--project", str(proj),
+            "--out", str(out_dir),
+            "--repeats", "2",
+            "--hash-seeds", "",
+            "--orders", "0",
+            "--timezones", "",
+            "--isolated-scope", "smart",
+        ]
+        if engine == "python":
+            env_py = {**os.environ, "FLAKY_PURE_PYTHON": "1", "PYTHONPATH": str(ROOT / "src")}
+            res = subprocess.run(
+                [sys.executable, "-m", "flaky_triage.cli", *args],
+                env=env_py,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        else:
+            res = subprocess.run(["bash", str(DETECT), *args], capture_output=True, text=True, timeout=120)
+        assert res.returncode == 0, f"{engine}: {res.stderr}"
+        with (out_dir / "results.csv").open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        # No isolated runs should have been triggered because only xpassed/xfailed occurred
+        assert [r for r in rows if r["condition"] == "isolated"] == []
+        xpass_outcomes = {r["outcome"] for r in rows if r["test_id"].endswith("::test_strict_xpass")}
+        xfail_outcomes = {r["outcome"] for r in rows if r["test_id"].endswith("::test_normal_xfail")}
+        assert xpass_outcomes == {"xpassed"}
+        assert xfail_outcomes == {"xfailed"}
+
+    # Also verify log fallback parser converts FAILED + [XPASS(strict)] to xpassed
+    expected = ["tests/test_xfail.py::test_strict_xpass"]
+    log_text = (
+        "============================= test session starts =============================\n"
+        "tests/test_xfail.py::test_strict_xpass FAILED                            [100%]\n"
+        "================================== FAILURES ===================================\n"
+        "______________________________ test_strict_xpass ______________________________\n"
+        "[XPASS(strict)] strict xpass case\n"
+        "=========================== short test summary info ===========================\n"
+        "FAILED tests/test_xfail.py::test_strict_xpass - [XPASS(strict)] strict xpass case\n"
+    )
+    outcomes, _ = runner._parse_verbose_log_fallback(log_text, expected)
+    assert outcomes["tests/test_xfail.py::test_strict_xpass"] == "xpassed"
+
+
+def test_task5_project_pointing_to_subdirectory_prints_target_hint(tmp_path):
+    """Task 5: Passing a test subdirectory without project config as --project exits 4 with --target Hint."""
+    repo = tmp_path / "my_repo"
+    sub = repo / "tests" / "unit"
+    sub.mkdir(parents=True)
+    (repo / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (sub / "test_unit.py").write_text("def test_one():\n    assert True\n", encoding="utf-8")
+
+    expected_hint = (
+        "Hint: If you want to diagnose a specific subdirectory or test file, "
+        "keep --project pointed at the repository root and pass the subdirectory via --target <path>."
+    )
+    for engine, res in _run_both_engines(
+        [
+            "--project", str(sub),
+            "--out", str(tmp_path / "sub_out"),
+            "--no-report",
+        ]
+    ):
+        assert res.returncode == 4, f"{engine} returned {res.returncode}: {res.stderr}"
+        assert expected_hint in res.stderr
+
+
+def test_task8_default_isolated_runs_is_two(tmp_path):
+    """Task 8.1: Default --isolated-runs is 2 when not explicitly specified."""
+    import csv
+
+    proj = tmp_path / "iso_default_proj"
+    (proj / "tests").mkdir(parents=True)
+    (proj / "tests" / "test_fail.py").write_text(
+        "def test_always_fails():\n    assert False\n",
+        encoding="utf-8",
+    )
+    for engine in ("python", *(["bash"] if os.name != "nt" else [])):
+        out_dir = tmp_path / f"iso_def_{engine}"
+        args = [
+            "--project", str(proj),
+            "--out", str(out_dir),
+            "--repeats", "1",
+            "--hash-seeds", "",
+            "--orders", "0",
+            "--timezones", "",
+            "--no-report",
+        ]
+        if engine == "python":
+            env_py = {**os.environ, "FLAKY_PURE_PYTHON": "1", "PYTHONPATH": str(ROOT / "src")}
+            res = subprocess.run(
+                [sys.executable, "-m", "flaky_triage.cli", *args],
+                env=env_py,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        else:
+            res = subprocess.run(["bash", str(DETECT), *args], capture_output=True, text=True, timeout=120)
+        assert res.returncode == 0, f"{engine}: {res.stderr}"
+        with (out_dir / "results.csv").open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        iso_rows = [r for r in rows if r["condition"] == "isolated"]
+        assert len(iso_rows) == 2
+
+
+
 
 

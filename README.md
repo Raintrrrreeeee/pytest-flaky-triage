@@ -22,14 +22,14 @@ Unlike simple rerun plugins (`pytest-repeat`, `pytest-flakefinder`, `pytest-rand
                                      |  results.csv & run_meta.csv
                                      v
 +-------------------------------------------------------------------------+
-| Stage 2: Statistical & Causal Inference (src/analysis/)                 |
+| Stage 2: Statistical & Causal Inference (pytest_flaky_triage_analysis)  |
 |   Crash-resilient stability score + Orthogonal condition attribution    |
 |   Bidirectional isolation check + Polluter set intersection             |
 +------------------------------------+------------------------------------+
                                      |  diagnosis.json
                                      v
 +-------------------------------------------------------------------------+
-| Stage 3: Static Python AST Disambiguation & Report (src/report/)        |
+| Stage 3: Static Python AST Disambiguation (pytest_flaky_triage_report)  |
 |   3-hop cross-file call graph + conftest.py fixtures + setup_method     |
 |   Test Side vs. Code Side fault attribution -> report.md (EN / ZH)      |
 +-------------------------------------------------------------------------+
@@ -42,13 +42,13 @@ Unlike simple rerun plugins (`pytest-repeat`, `pytest-flakefinder`, `pytest-rand
 ```markdown
 | Test                                     | Verdict  | Score        | Repeat | Hashseed | Order | Timezone | Isolated | Suspected Cause             | Fault Side | Basis       |
 | :--------------------------------------- | :------: | :----------: | :----: | :------: | :---: | :------: | :------: | :-------------------------- | :--------: | :---------- |
-| `test_taxes_format`                      | `flaky`  | 0.14 (4/28)  |  0/10  |   4/8    |  0/6  |   0/3    |   0/1    | `hash_order_sensitivity`    | Test Side  | Runtime+AST |
-| `test_shared_cart_has_no_prior_laptop`   | `flaky`  | 0.14 (4/28)  |  0/10  |   0/8    |  3/6  |   0/3    |   1/1    | `shared_state_interference` | Test Side  | Runtime+AST |
-| `test_daily_order_prefix_uses_utc_date`  | `flaky`  | 0.93 (26/28) | 10/10  |   8/8    |  6/6  |   1/3    |   1/1    | `timezone_sensitivity`      | Code Side  | Runtime+AST |
-| `test_receipt_timestamp_formatting`      | `flaky`  | 0.93 (26/28) | 10/10  |   8/8    |  6/6  |   1/3    |   1/1    | `timezone_sensitivity`      | Test Side  | Runtime+AST |
-| `test_get_daily_quote`                   | `flaky`  | 0.25 (7/28)  |  3/10  |   2/8    |  1/6  |   1/3    |   0/1    | `unseeded_randomness`       | Code Side  | AST Hint *  |
-| `test_checkout_deducts_mouse`            | `flaky`  | 0.46 (13/28) |  5/10  |   4/8    |  2/6  |   1/3    |   1/1    | `race_conditions`           | Code Side  | AST Hint *  |
-| `test_add_item_to_cart_is_deterministic` | `stable` | 1.00 (28/28) | 10/10  |   8/8    |  6/6  |   3/3    |   1/1    | —                           |     —      | —           |
+| `test_taxes_format`                      | `flaky`  | 0.14 (4/29)  |  0/10  |   4/8    |  0/6  |   0/3    |   0/2    | `hash_order_sensitivity`    | Test Side  | Runtime+AST |
+| `test_shared_cart_has_no_prior_laptop`   | `flaky`  | 0.17 (5/29)  |  0/10  |   0/8    |  3/6  |   0/3    |   2/2    | `shared_state_interference` | Test Side  | Runtime+AST |
+| `test_daily_order_prefix_uses_utc_date`  | `flaky`  | 0.93 (27/29) | 10/10  |   8/8    |  6/6  |   1/3    |   2/2    | `timezone_sensitivity`      | Code Side  | Runtime+AST |
+| `test_receipt_timestamp_formatting`      | `flaky`  | 0.93 (27/29) | 10/10  |   8/8    |  6/6  |   1/3    |   2/2    | `timezone_sensitivity`      | Test Side  | Runtime+AST |
+| `test_get_daily_quote`                   | `flaky`  | 0.24 (7/29)  |  3/10  |   2/8    |  1/6  |   1/3    |   0/2    | `unseeded_randomness`       | Code Side  | AST Hint *  |
+| `test_checkout_deducts_mouse`            | `flaky`  | 0.45 (13/29) |  5/10  |   4/8    |  2/6  |   1/3    |   1/2    | `race_conditions`           | Code Side  | AST Hint *  |
+| `test_add_item_to_cart_is_deterministic` | `stable` | 1.00 (29/29) | 10/10  |   8/8    |  6/6  |   3/3    |   2/2    | —                           |     —      | —           |
 ```
 
 Each diagnostic section further pinpoints the **polluting predecessor test** and **exact source line**:
@@ -66,19 +66,19 @@ Each diagnostic section further pinpoints the **polluting predecessor test** and
 
 ### Stage 1 — Controlled 5-Dimension Perturbation Runner (`flaky_triage.runner`, `scripts/detect.sh` & `flaky_plugin.py`)
 - **Single-Factor Experimental Matrix**: Evaluates tests across five orthogonal conditions (`repeat`, `hashseed`, `order`, `tz`, and `isolated`), holding all other variables fixed so each perturbation isolates a distinct class of flakiness.
-- **Timezone Perturbation (`tz`)**: Runs tests across extreme UTC offsets (`UTC`, `Pacific/Kiritimati` at UTC+14, and `America/Pago_Pago` at UTC-11, spanning a 25-hour window) and invokes `time.tzset()` inside the pytest hook plugin to expose naive local-time and date-boundary assumptions at any hour of the day.
+- **Timezone Perturbation (`tz`)**: Runs tests across extreme UTC offsets (`UTC`, `Pacific/Kiritimati` at UTC+14, and `Pacific/Pago_Pago` at UTC-11, spanning a 25-hour window) and invokes `time.tzset()` inside the pytest hook plugin to expose naive local-time and date-boundary assumptions at any hour of the day.
 - **Sideband Pytest Hook Plugin**: Captures per-test outcomes (`setup` / `call` / `teardown`) directly from pytest hooks into a structured sideband event stream, remaining accurate regardless of project `pytest.ini` flags (`-q`, custom progress bars, multiline failure tracebacks, or parameterized IDs containing spaces and brackets), with a hardened AWK/regex log-parser fallback.
-- **In-Memory `O(N)` Reordering & Plugin Neutralization**: Reorders tests in-place via `pytest_collection_modifyitems` and automatically disables conflicting third-party plugins (`pytest-randomly`, `pytest-xdist`, `pytest-sugar`, `pytest-cov`, `pytest-rerunfailures`, `pytest-order`) during matrix runs.
+- **In-Memory `O(N)` Reordering & Plugin Neutralization**: Reorders tests in-place via `pytest_collection_modifyitems` (`trylast=True`) and automatically disables conflicting third-party plugins (`pytest-randomly`, `pytest-xdist`, `pytest-sugar`, `pytest-cov`, `pytest-rerunfailures`, `pytest-order`) while clearing project `addopts` (`-o addopts=""`) during matrix runs.
 - **Cross-Platform Process-Group Timeout & Hang Protection**: Executes every run in an isolated process group with `stdin` closed and process-tree termination on timeout (exit code `124`), cleanly terminating hung background threads or child processes on **macOS, Linux, and Windows (PowerShell / CMD / Git Bash)**.
 - **Large-Suite Acceleration & Deep-Dive Preset (`--intensive`)**: Supports `--target SUBPATH`, `-k EXPR` filtering, `--python PATH` cross-environment execution, `--isolated-scope smart` (running expensive single-test process isolation only for tests that failed or flipped in suite runs), `--isolated-runs N` (running each isolated test `N` times to catch internal low-frequency flakiness without suite interference), and `--intensive` (`30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs (all tests)`).
 
-### Stage 2 — Statistical Scoring & Polluter Inference (`src/analysis/`)
-- **Crash-Resilient Stability Scoring**: Computes `passed / (passed + failed + error)` across valid observations while preventing incomplete, timed-out, or crashed runs from producing false condition attributions.
+### Stage 2 — Statistical Scoring & Polluter Inference (`src/pytest_flaky_triage_analysis/`)
+- **Crash-Resilient Stability Scoring**: Computes `passed / (passed + failed + error)` across valid observations while preventing incomplete, timed-out, or crashed runs from producing false condition attributions. Known-defect tests marked with `@pytest.mark.xfail` (including `strict=True` / `XPASS(strict)`) are categorized as `excluded` and do not participate in flaky verdicts or isolated verification runs.
 - **Bidirectional Isolation Attribution**: Detects both **polluted victims** (fail in suite runs, pass when isolated) and **state consumers** (pass in suite runs because an earlier test initialized shared state, but fail when run in isolation).
 - **Automated Polluter Identification (`suspected_polluters`)**: Tracks exact execution positions in every suite run and computes `common_on_fail - ever_on_pass` across predecessor sets (with symmetric mutual-polluter refinement) to pinpoint which earlier test dirtied the shared state.
 - **Small-Sample False-Positive Guards**: Protects low-probability probabilistic tests that happen not to flip during the finite `repeat` baseline from being misclassified as deterministic hash-seed or order bugs.
 
-### Stage 3 — Static Python AST Disambiguation & Triage Report (`src/report/`)
+### Stage 3 — Static Python AST Disambiguation & Triage Report (`src/pytest_flaky_triage_report/`)
 - **Runtime + AST Disambiguation & Refinement**: When runtime behaviour is ambiguous (both `unseeded_randomness` and `race_conditions` vary under identical seed and test order), inspects Python Abstract Syntax Trees (AST) to narrow the root cause (`AST Hint *`); when runtime evidence points to `hash_order_sensitivity` or `shared_state_interference` and AST identifies strict floating-point equality (`float_precision`) or unisolated file/port resources (`resource_leak`), refines the category (`AST Refined *`) while preserving the original runtime candidates and assigning fault ownership (`Test Side` vs. `Code Side`).
 - **Deep Cross-File Call Graph & Fixture Resolution**:
   - Follows same-file helper functions (`_helper()`), class methods, and imported functions/classes up to **3 hops** across project modules (including relative imports and `import X as Y` / `from X import Y as Z` aliases).
@@ -98,7 +98,7 @@ Requires **Python 3.10+** and supports **macOS**, **Linux**, and **Windows (Powe
 
 ### Mode 1: Install Only the CLI Tool (`pip install`, without `scenario/`)
 
-If you want to install `pytest-flaky-triage` as a lightweight command-line tool to diagnose your own projects, `pip install` packages **only** the core triage engine (`flaky_triage`, `analysis`, `report`) and **does not** install the demo `scenario/` or test fixtures into your environment:
+If you want to install `pytest-flaky-triage` as a lightweight command-line tool to diagnose your own projects, `pip install` packages **only** the core triage engine (`flaky_triage`, `pytest_flaky_triage_analysis`, `pytest_flaky_triage_report`) and **does not** install the demo `scenario/` or test fixtures into your environment:
 
 **macOS / Linux:**
 ```bash
@@ -218,10 +218,10 @@ pytest-flaky-triage --project /path/to/project \
   --out ./out
 
 # 6. Run Stage 2 standalone (statistical scoring & polluter inference from existing CSVs)
-python -m analysis --results ./out/results.csv --run-meta ./out/run_meta.csv --out ./out/diagnosis.json
+python -m pytest_flaky_triage_analysis --results ./out/results.csv --run-meta ./out/run_meta.csv --out ./out/diagnosis.json
 
 # 7. Run Stage 3 standalone (AST source disambiguation & Markdown report rendering from diagnosis.json)
-python -m report --diagnosis ./out/diagnosis.json --out ./out/report.md --project /path/to/project --lang en
+python -m pytest_flaky_triage_report --diagnosis ./out/diagnosis.json --out ./out/report.md --project /path/to/project --lang en
 
 # 8. Show CLI help (or invoke the equivalent repository script scripts/detect.sh)
 pytest-flaky-triage --help
@@ -237,7 +237,7 @@ Each condition changes one factor and keeps the others fixed:
 | `repeat` | nothing: the same command again | test order, `PYTHONHASHSEED=0`, `TZ=UTC` | unseeded randomness, race conditions |
 | `hashseed` | `PYTHONHASHSEED`, one run per seed | test order, `TZ=UTC` | set / hash-order dependence |
 | `order` | test order: reversed, then seeded shuffles (`O(N)` hook reorder) | `PYTHONHASHSEED=0`, `TZ=UTC` | order dependence, shared state |
-| `tz` | `TZ` environment variable (`UTC`, `Pacific/Kiritimati`, `America/Pago_Pago`) | test order, `PYTHONHASHSEED=0` | naive local-time / UTC date-boundary sensitivity |
+| `tz` | `TZ` environment variable (`UTC`, `Pacific/Kiritimati`, `Pacific/Pago_Pago`) | test order, `PYTHONHASHSEED=0` | naive local-time / UTC date-boundary sensitivity |
 | `isolated` | each test runs alone in its own process (`--isolated-runs N` times) | `PYTHONHASHSEED=0`, `TZ=UTC` | shared state (victim or state-consumer) & internal randomness/races |
 
 ### Command-Line Options
@@ -252,8 +252,8 @@ Each condition changes one factor and keeps the others fixed:
 | `--repeats N` | `10` (`30` with `--intensive`) | plain repeated runs (`N >= 1`) |
 | `--hash-seeds "S..."` | `"1 2 3 4 5 6 7 8"` (`1..15` with `--intensive`) | `PYTHONHASHSEED` values, one run each; `""` to skip (`--hashseeds N` also supported) |
 | `--orders K` | `5` (`15` with `--intensive`) | seeded shuffled-order runs plus one reversed run; `0` to skip (`--shuffles K` also supported) |
-| `--timezones "TZ..."` | `"UTC Pacific/Kiritimati America/Pago_Pago"` | `TZ` timezone values, one run each; `""` to skip |
-| `--isolated-runs N` | `1` (`5` with `--intensive`) | isolated runs of each test on its own (`N >= 1`; `--isolated N` also accepted, `0` to skip) |
+| `--timezones "TZ..."` | `"UTC Pacific/Kiritimati Pacific/Pago_Pago"` | `TZ` timezone values, one run each; `""` to skip |
+| `--isolated-runs N` | `2` (`5` with `--intensive`) | isolated runs of each test on its own (`N >= 1`; `--isolated N` also accepted, `0` to skip) |
 | `--isolated-scope MODE` | `all` | `all` runs every collected test in isolation; `smart` runs only tests that failed or flipped in earlier conditions |
 | `--timeout SECONDS` | `60` | hard time limit for a single pytest run |
 | `--out DIR` | `out/` | output folder (rejects `/`, `$HOME`, symlinks, and folders containing `--project`) |
@@ -296,11 +296,11 @@ scripts/
   lib/flaky_plugin.py    pytest sideband hook plugin, O(N) reorder, and process-group timeout controller
   lib/parse_log.awk      hardened AWK log-parser fallback
   demo.sh                runs the demonstration scenario end to end
-  test.sh                runs the tool's own 139-test verification suite
+  test.sh                runs the tool's own verification suite
 src/
-  analysis/              Stage 2 stability scoring, root-cause inference, and polluter identification (`python -m analysis`)
-  report/                Stage 3 AST source heuristics and Markdown triage report generator (`python -m report`)
-  flaky_triage/          pip-installable CLI package (`pytest-flaky-triage`) with bundled runtime scripts
+  pytest_flaky_triage_analysis/  Stage 2 stability scoring, root-cause inference, and polluter identification (`python -m pytest_flaky_triage_analysis`)
+  pytest_flaky_triage_report/    Stage 3 AST source heuristics and Markdown triage report generator (`python -m pytest_flaky_triage_report`)
+  flaky_triage/                  pip-installable CLI package (`pytest-flaky-triage`) with bundled runtime scripts
 tests/
   test_parser.py         parser fixture tests: each fixture's results.csv vs its expected.csv
   test_runner.py         argument checks, exit codes, output-folder safety
@@ -327,7 +327,7 @@ The repository includes an optional simulated **E-commerce Cart and Checkout Sys
 2. **Unseeded Randomness (`unseeded_randomness`, Code Side, 4 tests):** Production methods call unseeded `random.choice(...)` while tests assert a single fixed return value.
 3. **Race Conditions (`race_conditions`, Code Side, 4 tests):** `Cart.checkout()` spawns an unjoined background `threading.Thread` to deduct inventory, racing against the test's immediate stock assertion.
 4. **Shared State Interference (`shared_state_interference`, Test Side, 4 tests):** Two pairs of tests mutate a shared module-level `Cart` instance (`shared_test_cart`) without cleanup, failing depending on execution order and passing in isolation.
-5. **Timezone / Local-Time Sensitivity (`timezone_sensitivity`, 2 Code Side & 2 Test Side, 4 tests):** Production methods and tests mix naive local time (`datetime.now()`, `date.today()`, `datetime.fromtimestamp(ts)` without `tz`, `time.localtime(ts)`) with UTC expectations, flipping when `TZ` is perturbed across extreme UTC offsets (`UTC`, `Pacific/Kiritimati`, `America/Pago_Pago`).
+5. **Timezone / Local-Time Sensitivity (`timezone_sensitivity`, 2 Code Side & 2 Test Side, 4 tests):** Production methods and tests mix naive local time (`datetime.now()`, `date.today()`, `datetime.fromtimestamp(ts)` without `tz`, `time.localtime(ts)`) with UTC expectations, flipping when `TZ` is perturbed across extreme UTC offsets (`UTC`, `Pacific/Kiritimati`, `Pacific/Pago_Pago`).
 6. **Deterministic Controls (`stable`, 2 tests):** Purely local, deterministic, synchronous tests that pass 100% of the time across all conditions.
 
 ## Acknowledgements

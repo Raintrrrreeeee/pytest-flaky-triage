@@ -87,7 +87,7 @@ The scenario test suite (`scenario/tests/test_cart.py`) contains **22 tests in t
 - **Code Side (2 tests):** `Cart.generate_daily_order_prefix()` calls naive `datetime.now()` and `Cart.is_flash_coupon_active()` calls local `date.today()`, while the tests compare against explicit UTC dates (`datetime.now(timezone.utc)`).
 - **Test Side (2 tests):** `Cart.format_receipt_timestamp()` and `Cart.format_audit_date_tag()` format epoch timestamps in explicit UTC (`tz=timezone.utc`), while the tests compute expected strings using local-time `datetime.fromtimestamp(epoch)` (without `tz`) or `time.localtime(epoch)`.
 
-**Why it fails:** Under a fixed timezone (`TZ=UTC`), repeat, hashseed, order, and isolated runs are 100% consistent. When `TZ` is perturbed across extreme offsets (`UTC`, `Pacific/Kiritimati` at UTC+14, and `America/Pago_Pago` at UTC-11, spanning a 25-hour window), local calendar dates and wall-clock hours diverge from UTC at every instant of the day.
+**Why it fails:** Under a fixed timezone (`TZ=UTC`), repeat, hashseed, order, and isolated runs are 100% consistent. When `TZ` is perturbed across extreme offsets (`UTC`, `Pacific/Kiritimati` at UTC+14, and `Pacific/Pago_Pago` at UTC-11, spanning a 25-hour window), local calendar dates and wall-clock hours diverge from UTC at every instant of the day.
 
 | Test Name | Method Tested | Fault Side | Expected Category |
 | :--- | :--- | :--- | :--- |

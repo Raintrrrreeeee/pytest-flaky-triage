@@ -5,7 +5,7 @@ import re
 from collections import deque
 from pathlib import Path
 
-from report.ast_utils import (
+from pytest_flaky_triage_report.ast_utils import (
     MAX_CALL_DEPTH,
     SETUP_METHODS,
     _call_head_name,
@@ -23,7 +23,7 @@ from report.ast_utils import (
     _resolve_call_parts,
     _split_test_id,
 )
-from report.signals import (
+from pytest_flaky_triage_report.signals import (
     _collect_class_self_attrs,
     _collect_local_var_context,
     _expand_expr_nodes,
@@ -318,7 +318,7 @@ def _link_float_returning_callees(indicators, float_returning_callees, scanned_t
             break
 
 
-def inspect_test_source(test_id, project_dir=None):
+def inspect_test_source(test_id, project_dir=None, suspected_polluters=None):
     """Inspect test and called production ASTs to collect heuristic indicators.
 
     Returns a dictionary with:
@@ -970,6 +970,30 @@ def inspect_test_source(test_id, project_dir=None):
 
     _enrich_hash_order_from_set_callees(indicators, set_returning_callees)
     _link_float_returning_callees(indicators, float_returning_callees, scanned_test_side_funcs)
+
+    if suspected_polluters:
+        existing_shared = indicators["shared_state_interference"]
+        existing_sides = {h["side"] for h in existing_shared}
+        seen_shared_keys = {
+            (h["side"], h["location"], h["detail"]) for h in existing_shared
+        }
+        for polluter_id in suspected_polluters:
+            if not isinstance(polluter_id, str) or polluter_id == test_id:
+                continue
+            p_file_part, p_node_parts = _split_test_id(polluter_id)
+            if p_file_part != file_part or not p_node_parts:
+                continue
+            p_info = inspect_test_source(
+                polluter_id, project_dir=project_dir, suspected_polluters=None
+            )
+            p_shared = (p_info.get("indicators") or {}).get("shared_state_interference", [])
+            for hit in p_shared:
+                if existing_sides and hit["side"] not in existing_sides:
+                    continue
+                h_key = (hit["side"], hit["location"], hit["detail"])
+                if h_key not in seen_shared_keys:
+                    seen_shared_keys.add(h_key)
+                    existing_shared.append(dict(hit))
 
     return {
         "available": True,

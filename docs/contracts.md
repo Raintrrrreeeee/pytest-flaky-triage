@@ -2,8 +2,8 @@
 
 This document defines the CSV/JSON schemas and architectural contract boundaries between:
 - **Stage 1 (`flaky_triage.runner` / `scripts/detect.sh` & `flaky_plugin.py`)**: Controlled 5-dimension perturbation execution (`events/run_XXXX.jsonl` -> `results.csv` & `run_meta.csv`)
-- **Stage 2 (`src/analysis`)**: Pure runtime statistical scoring, causal attribution, and polluter inference (`diagnosis.json`)
-- **Stage 3 (`src/report`)**: Static AST heuristic disambiguation, category refinement, fault-side attribution, and bilingual Markdown report generation (`report.md`)
+- **Stage 2 (`src/pytest_flaky_triage_analysis`)**: Pure runtime statistical scoring, causal attribution, and polluter inference (`diagnosis.json`)
+- **Stage 3 (`src/pytest_flaky_triage_report`)**: Static AST heuristic disambiguation, category refinement, fault-side attribution, and bilingual Markdown report generation (`report.md`)
 
 ---
 
@@ -45,7 +45,7 @@ After each run completes (or is terminated by the process-group timeout controll
 
 ## 2. Stage 2 -> Stage 3 Contract (`diagnosis.json`)
 
-Stage 2 (`python -m analysis`) performs pure runtime statistical scoring and causal attribution from `results.csv` and `run_meta.csv` without inspecting Python source files.
+Stage 2 (`python -m pytest_flaky_triage_analysis`) performs pure runtime statistical scoring and causal attribution from `results.csv` and `run_meta.csv` without inspecting Python source files.
 
 ### 2.1 Top-Level Fields
 - `schema_version`: Integer schema version (`1`).
@@ -70,7 +70,7 @@ Each element in `tests[]` contains:
 
 ### 2.3 Suspected Cause Object (`suspected_causes[]`)
 Each element in `suspected_causes[]` contains:
-- `candidates`: Non-empty list of root-cause category identifiers. All **9 legal cause categories** supported across Stage 2 and Stage 3 (`src/report/core.py`):
+- `candidates`: Non-empty list of root-cause category identifiers. All **9 legal cause categories** supported across Stage 2 and Stage 3 (`src/pytest_flaky_triage_report/core.py`):
   1. `order_dependency`
   2. `shared_state_interference`
   3. `hash_seed_sensitivity` (canonical alias: `hash_order_sensitivity`)
@@ -137,7 +137,7 @@ Each element in `suspected_causes[]` contains:
 
 ## 3. Stage 3 Disambiguation & Report Contract (`report.md` & Enriched `diagnosis.json`)
 
-When Stage 3 (`python -m report` / `src.report.heuristics.disambiguate_causes`) inspects the target project's Python AST (following same-file helpers, `conftest.py` fixtures, `setup_method`, and up to 3 hops of cross-file imports), it enriches `suspected_causes` while preserving the original Stage 2 runtime fields.
+When Stage 3 (`python -m pytest_flaky_triage_report` / `pytest_flaky_triage_report.heuristics.disambiguate_causes`) inspects the target project's Python AST (following same-file helpers, `conftest.py` fixtures, `setup_method`, and up to 3 hops of cross-file imports), it enriches `suspected_causes` while preserving the original Stage 2 runtime fields.
 
 ### 3.1 Preserved Runtime & Resolution Fields on `suspected_causes[]`
 Whenever Stage 3 narrows an ambiguous cause or refines a deterministic cause:

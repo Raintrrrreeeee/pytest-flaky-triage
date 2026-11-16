@@ -36,8 +36,8 @@ PROJECT=""
 REPEATS=10
 HASH_SEEDS="1 2 3 4 5 6 7 8"
 ORDERS=5
-TIMEZONES="UTC Pacific/Kiritimati America/Pago_Pago"
-ISOLATED=1
+TIMEZONES="UTC Pacific/Kiritimati Pacific/Pago_Pago"
+ISOLATED=2
 ISOLATED_SCOPE="all"
 TIMEOUT=60
 if [[ ${FLAKY_INSTALLED_PACKAGE:-0} == 1 ]]; then
@@ -223,6 +223,21 @@ for tz_val in $TIMEZONES; do
     TZ_ARR+=("$tz_val")
 done
 set +f
+if [[ ${#TZ_ARR[@]} -gt 0 ]]; then
+    _py_tz=${FLAKY_TOOL_PYTHON:-$(command -v python3 || command -v python || true)}
+    if [[ -n $_py_tz ]]; then
+        bad_tz=$("$_py_tz" -c '
+import sys
+from zoneinfo import ZoneInfo
+for tz in sys.argv[1:]:
+    try:
+        ZoneInfo(tz)
+    except Exception:
+        print(tz)
+        sys.exit(1)
+' "${TZ_ARR[@]}") || die "--timezones values must be valid timezone identifiers (got '$bad_tz')" "$E_USAGE"
+    fi
+fi
 TIMEZONES="${TZ_ARR[*]:-}"
 
 # Reject symlinked output paths before creating directories so symlink targets
@@ -274,12 +289,12 @@ run_analysis_and_report() {
         die "--report-only requires an existing $OUT_REL/diagnosis.json or $OUT_REL/results.csv" "$E_REPORT"
     fi
     if [[ $REPORT_ONLY != yes || ! -f $OUT_DIR/diagnosis.json ]]; then
-        if [[ ! -d $TOOL_ROOT/src/analysis && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
+        if [[ ! -d $TOOL_ROOT/src/pytest_flaky_triage_analysis && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
             say "analysis stage not in the repository yet; stopping after results.csv"
             exit 0
         fi
         local analysis_rc=0
-        PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m analysis "$OUT_DIR/results.csv" "$OUT_DIR" || analysis_rc=$?
+        PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m pytest_flaky_triage_analysis "$OUT_DIR/results.csv" "$OUT_DIR" || analysis_rc=$?
         case $analysis_rc in
             0) say "diagnosis: $OUT_REL/diagnosis.json" ;;
             2) die "analysis stage rejected its arguments (exit 2)" "$E_REPORT" ;;
@@ -290,12 +305,12 @@ run_analysis_and_report() {
         esac
     fi
 
-    if [[ ! -d $TOOL_ROOT/src/report && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
+    if [[ ! -d $TOOL_ROOT/src/pytest_flaky_triage_report && ${FLAKY_INSTALLED_PACKAGE:-0} != 1 ]]; then
         say "report stage not in the repository yet; stopping after diagnosis.json"
         exit 0
     fi
     local report_rc=0
-    PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m report "$OUT_DIR/diagnosis.json" "$OUT_DIR" --project "$PROJECT" --lang "$REPORT_LANG" || report_rc=$?
+    PYTHONPATH="$TOOL_PYTHONPATH" "$TOOL_PYTHON" -m pytest_flaky_triage_report "$OUT_DIR/diagnosis.json" "$OUT_DIR" --project "$PROJECT" --lang "$REPORT_LANG" || report_rc=$?
     case $report_rc in
         0) say "report:    $OUT_REL/report.md" ;;
         2) die "report stage rejected its arguments (exit 2)" "$E_REPORT" ;;
@@ -345,7 +360,11 @@ cleanup_on_signal() {
     [[ -n $CURRENT_RUN_TMP && -d $CURRENT_RUN_TMP ]] && rm -rf "$CURRENT_RUN_TMP"
     rm -f "$OUT_DIR/orders/single.txt" "$OUT_DIR/orders/smart_isolated.txt" "$OUT_DIR/collected.tmp"
     echo "" >&2
-    say "aborted by signal (exit $code)"
+    if [[ $code -eq 130 ]]; then
+        say "Interrupted by user (Ctrl+C). Partial logs and results (if any) are in $OUT_REL. To resume or inspect existing data without re-running pytest, use --report-only."
+    else
+        say "aborted by signal (exit $code)"
+    fi
     exit "$code"
 }
 trap 'cleanup_on_signal 130' INT
@@ -364,6 +383,7 @@ run_with_timeout() {
 # Fixed pytest options to neutralize conflicting plugins while preserving custom plugins:
 PYTEST_OPTS=(
     --rootdir="$PROJECT"
+    -o addopts=""
     -o console_output_style=progress
     -p flaky_plugin
     -p no:randomly
@@ -501,12 +521,26 @@ run_one() {
     printf '%s,%s,"%s",%s,%s,%s,%s,%s,%s,%s\n' \
         "$RUN_ID" "$condition" "${value//\"/\"\"}" "$hash_seed" "$rc" "$status" \
         "$seconds" "$n_expected" "$n_parsed" "$log_rel" >> "$OUT_DIR/run_meta.csv"
+    local disp_secs=${seconds:-0.00}
+    say "[run $RUN_ID/${N_RUNS:-0}] $condition ($value) finished in ${disp_secs}s [status=$status]"
 }
 
 # --------------------------------------------------------------- collection
 
 say "project: $PROJECT"
 say "python:  $TARGET_PYTHON ($("$TARGET_PYTHON" -m pytest --version 2>&1 | head -n 1))"
+
+SUBDIR_HINT="Hint: If you want to diagnose a specific subdirectory or test file, keep --project pointed at the repository root and pass the subdirectory via --target <path>."
+if [[ ! -f $PROJECT/pyproject.toml && ! -f $PROJECT/pytest.ini && ! -f $PROJECT/setup.py ]]; then
+    for _anc in "$(dirname "$PROJECT")" "$(dirname "$(dirname "$PROJECT")")"; do
+        if [[ $_anc != "$PROJECT" && $_anc != "$TOOL_ROOT" && -d $_anc ]]; then
+            if [[ -f $_anc/pyproject.toml || -f $_anc/pytest.ini || -f $_anc/setup.py ]]; then
+                say "$SUBDIR_HINT"
+                die "'$PROJECT' has no project config file while parent '$_anc' does; $SUBDIR_HINT" "$E_COLLECT"
+            fi
+        fi
+    done
+fi
 
 COLLECT_LOG=$OUT_DIR/collect.log
 COLLECT_TMP=$OUT_DIR/collected.tmp
@@ -532,6 +566,7 @@ case $collect_rc in
        if [[ -d $PROJECT/scenario/tests ]]; then
            say "hint: found benchmark suite at '$PROJECT/scenario' — try: --project $PROJECT/scenario"
        fi
+       say "$SUBDIR_HINT"
        die "pytest found no tests in $PROJECT" "$E_COLLECT" ;;
     124) rm -f "$COLLECT_TMP"; die "pytest collection timed out after ${TIMEOUT}s in $PROJECT" "$E_COLLECT" ;;
     *) rm -f "$COLLECT_TMP"
@@ -539,6 +574,7 @@ case $collect_rc in
        if [[ -d $PROJECT/scenario/tests ]]; then
            say "hint: found benchmark suite at '$PROJECT/scenario' — try: --project $PROJECT/scenario"
        fi
+       say "$SUBDIR_HINT"
        die "pytest could not collect the project (exit code $collect_rc); full output in $OUT_REL/collect.log" "$E_COLLECT" ;;
 esac
 
@@ -611,7 +647,7 @@ if [[ $ISOLATED -gt 0 ]]; then
         iso_candidates=$OUT_DIR/orders/smart_isolated.txt
         awk -F',' '
             NR == 1 { next }
-            $2 != "tz" && $NF != "passed" && $NF != "skipped" {
+            $2 != "tz" && $NF != "passed" && $NF != "skipped" && $NF != "xfailed" && $NF != "xpassed" {
                 line = $0
                 sub(/,[^,]*$/, "", line)
                 sub(/^[^,]*,[^,]*,("[^"]*"|[^,]*),[^,]*,/, "", line)
@@ -625,6 +661,8 @@ if [[ $ISOLATED -gt 0 ]]; then
         ' "$OUT_DIR/results.csv" > "$iso_candidates"
         N_ISO_CANDIDATES=$(grep -c . "$iso_candidates" || true)
         N_RUNS=$((BASE_RUNS + N_ISO_CANDIDATES * ISOLATED))
+        ISO_PLANNED=$((N_ISO_CANDIDATES * ISOLATED))
+        say "smart isolated scope: selected $N_ISO_CANDIDATES failing test(s) for isolated verification ($ISO_PLANNED isolated runs)..."
     fi
     iso_count=0
     while IFS= read -r test_id; do

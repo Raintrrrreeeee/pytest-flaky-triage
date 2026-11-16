@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 E_USAGE = 2      # bad arguments
 E_ENV = 3        # Python or pytest missing
@@ -35,7 +36,7 @@ _RANK = {
 
 _SUMMARY_SEC_RE = re.compile(r"^=+ .* in ([0-9]+\.[0-9]+)s.*=+$")
 _VERBOSE_OUTCOME_RE = re.compile(
-    r"^(.+?::.+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+.*)?$"
+    r"^(.+?::.+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS\(strict\)|XPASS)(?:\s+.*)?$"
 )
 _START_RESULTS_BANNER_RE = re.compile(r"^=+ test session starts =+$")
 _END_RESULTS_BANNER_RE = re.compile(
@@ -48,6 +49,7 @@ _STATUS_TO_OUTCOME = {
     "ERROR": "error",
     "SKIPPED": "skipped",
     "XFAIL": "xfailed",
+    "XPASS(strict)": "xpassed",
     "XPASS": "xpassed",
 }
 
@@ -57,7 +59,14 @@ def _is_uint(val):
 
 
 def _is_tz(val):
-    return bool(re.match(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$", str(val)))
+    s = str(val)
+    if not re.match(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$", s):
+        return False
+    try:
+        ZoneInfo(s)
+        return True
+    except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
+        return False
 
 
 def _csv_quote(text):
@@ -92,8 +101,8 @@ Options:
   --orders K                 seeded shuffled-order runs, plus one reversed run;
                              0 to skip (default 5)
   --timezones "TZ..."        TZ environment values, one run each; "" to skip
-                             (default "UTC Pacific/Kiritimati America/Pago_Pago")
-  --isolated-runs N          isolated runs per test, N >= 1 (default 1;
+                             (default "UTC Pacific/Kiritimati Pacific/Pago_Pago")
+  --isolated-runs N          isolated runs per test, N >= 1 (default 2;
                              --isolated N also accepted, 0 to skip)
   --isolated-scope MODE      'all' (every test) or 'smart' (only tests with
                              suite failures) (default all)
@@ -132,18 +141,32 @@ def _parse_verbose_log_fallback(log_source, expected_ids=None):
         _START_RESULTS_BANNER_RE.match(raw_line.strip()) for raw_line in lines
     )
     in_results = not has_start_banner
+    results_done = False
 
     for raw_line in lines:
         line = raw_line.rstrip("\r\n")
         if not line:
             continue
         stripped_line = line.strip()
+        if results_done:
+            if "[XPASS(strict)]" in line:
+                matched_xpass = False
+                for nid, out_val in list(outcomes.items()):
+                    if out_val == "failed" and nid in line:
+                        outcomes[nid] = "xpassed"
+                        matched_xpass = True
+                if not matched_xpass:
+                    failed_nids = [nid for nid, out_val in outcomes.items() if out_val == "failed"]
+                    if len(failed_nids) == 1:
+                        outcomes[failed_nids[0]] = "xpassed"
+            continue
         if not in_results:
             if _START_RESULTS_BANNER_RE.match(stripped_line):
                 in_results = True
             continue
         if _END_RESULTS_BANNER_RE.match(stripped_line):
-            break
+            results_done = True
+            continue
 
         matched_nid = None
         matched_out = None
@@ -176,6 +199,8 @@ def _parse_verbose_log_fallback(log_source, expected_ids=None):
                     matched_out = _STATUS_TO_OUTCOME[raw_tok]
 
         if matched_nid is not None and matched_out is not None:
+            if "[XPASS(strict)]" in line and matched_out == "failed":
+                matched_out = "xpassed"
             if matched_nid not in outcomes:
                 outcomes[matched_nid] = matched_out
                 n_reported += 1
@@ -393,8 +418,8 @@ def run_detect(argv=None):
     repeats_raw = "10"
     hash_seeds_raw = "1 2 3 4 5 6 7 8"
     orders_raw = "5"
-    timezones_raw = "UTC Pacific/Kiritimati America/Pago_Pago"
-    isolated_raw = "1"
+    timezones_raw = "UTC Pacific/Kiritimati Pacific/Pago_Pago"
+    isolated_raw = "2"
     isolated_scope = "all"
     timeout_raw = "60"
     out_raw = str((Path.cwd() / "out") if installed else (tool_root / "out"))
@@ -595,7 +620,7 @@ def run_detect(argv=None):
             env["PYTHONPATH"] = tool_pythonpath
         if not report_only or not diag_path.is_file():
             proc_a = subprocess.run(
-                [tool_python, "-m", "analysis", str(res_csv), str(out_dir)],
+                [tool_python, "-m", "pytest_flaky_triage_analysis", str(res_csv), str(out_dir)],
                 env=env,
                 check=False,
             )
@@ -617,7 +642,7 @@ def run_detect(argv=None):
             [
                 tool_python,
                 "-m",
-                "report",
+                "pytest_flaky_triage_report",
                 str(diag_path),
                 str(out_dir),
                 "--project",
@@ -663,6 +688,7 @@ def run_detect(argv=None):
 
     pytest_opts = [
         f"--rootdir={project_dir}",
+        "-o", "addopts=",
         "-o", "console_output_style=progress",
         "-p", "flaky_plugin",
         "-p", "no:randomly",
@@ -698,6 +724,23 @@ def run_detect(argv=None):
 
     say(f"project: {project_dir}")
     say(f"python:  {target_python} ({pytest_ver_line})")
+
+    config_markers = ("pyproject.toml", "pytest.ini", "setup.py")
+    subdir_hint = (
+        "Hint: If you want to diagnose a specific subdirectory or test file, "
+        "keep --project pointed at the repository root and pass the subdirectory via --target <path>."
+    )
+    has_own_config = any((project_dir / m).is_file() for m in config_markers)
+    if not has_own_config:
+        ignored_roots = {tool_root.resolve(), repo_root.resolve()}
+        for anc in (project_dir.parent, project_dir.parent.parent):
+            if anc != project_dir and anc not in ignored_roots:
+                if any((anc / m).is_file() for m in config_markers):
+                    say(subdir_hint)
+                    return die(
+                        f"'{project_dir}' has no project config file while parent '{anc}' does; {subdir_hint}",
+                        E_COLLECT,
+                    )
 
     collect_log = out_dir / "collect.log"
     collect_tmp = out_dir / "collected.tmp"
@@ -735,6 +778,7 @@ def run_detect(argv=None):
             collect_tmp.unlink(missing_ok=True)
             if (project_dir / "scenario" / "tests").is_dir():
                 say(f"hint: found benchmark suite at '{project_dir / 'scenario'}' — try: --project {project_dir / 'scenario'}")
+            say(subdir_hint)
             return die(f"pytest found no tests in {project_dir}", E_COLLECT)
         if collect_rc == 124:
             collect_tmp.unlink(missing_ok=True)
@@ -749,6 +793,7 @@ def run_detect(argv=None):
                 pass
             if (project_dir / "scenario" / "tests").is_dir():
                 say(f"hint: found benchmark suite at '{project_dir / 'scenario'}' — try: --project {project_dir / 'scenario'}")
+            say(subdir_hint)
             return die(
                 f"pytest could not collect the project (exit code {collect_rc}); full output in {out_rel}/collect.log",
                 E_COLLECT,
@@ -818,6 +863,7 @@ def run_detect(argv=None):
         def run_one(condition, value, hash_seed, expected_list, order_file=None, target_args=None):
             nonlocal run_id, total_timeouts, total_crashes, total_parsed
             run_id += 1
+            t0_run = time.monotonic()
             if is_tty:
                 sys.stderr.write(f"\r[detect] running {run_id}/{n_runs} ({condition} {value})...\033[K")
                 sys.stderr.flush()
@@ -910,6 +956,8 @@ def run_detect(argv=None):
                     f"{run_id},{condition},{_csv_quote(value)},{hash_seed},{rc},{status},"
                     f"{seconds_str},{n_expected},{n_parsed},{log_rel}\n"
                 )
+            disp_secs = seconds_str if seconds_str else f"{time.monotonic() - t0_run:.2f}"
+            say(f"[run {run_id}/{n_runs}] {condition} ({value}) finished in {disp_secs}s [status={status}]")
 
         for r in range(1, repeats + 1):
             run_one("repeat", str(r), 0, collected_ids, collected_file, extra_collect_args)
@@ -946,11 +994,21 @@ def run_detect(argv=None):
                 with results_csv.open(encoding="utf-8") as rstream:
                     reader = csv.DictReader(rstream)
                     for row in reader:
-                        if row["condition"] != "tz" and row["outcome"] not in ("passed", "skipped"):
+                        if row["condition"] != "tz" and row["outcome"] not in (
+                            "passed",
+                            "skipped",
+                            "xfailed",
+                            "xpassed",
+                        ):
                             failed_set.add(row["test_id"])
                 iso_list = [nid for nid in collected_ids if nid in failed_set]
                 smart_iso_file.write_text("".join(f"{nid}\n" for nid in iso_list), encoding="utf-8")
                 n_runs = base_runs + len(iso_list) * isolated
+                iso_planned = len(iso_list) * isolated
+                say(
+                    f"smart isolated scope: selected {len(iso_list)} failing test(s) "
+                    f"for isolated verification ({iso_planned} isolated runs)..."
+                )
             iso_count = 0
             for test_id in iso_list:
                 single_file.write_text(f"{test_id}\n", encoding="utf-8")
@@ -962,6 +1020,13 @@ def run_detect(argv=None):
             single_file.unlink(missing_ok=True)
             smart_iso_file.unlink(missing_ok=True)
             say(f"isolated: {iso_count} runs done")
+    except KeyboardInterrupt:
+        _cleanup_transient_files()
+        say(
+            f"Interrupted by user (Ctrl+C). Partial logs and results (if any) are in {out_rel}. "
+            "To resume or inspect existing data without re-running pytest, use --report-only."
+        )
+        return 130
     finally:
         _cleanup_transient_files()
 
@@ -1052,7 +1117,7 @@ def run_demo(argv=None):
     heading("The problem: the same suite, no code changes, run twice with plain pytest")
     for attempt in (1, 2):
         proc = subprocess.run(
-            [python_bin, "-m", "pytest", "-q", "-p", "no:randomly", "-p", "no:cacheprovider"],
+            [python_bin, "-m", "pytest", "-q", "-o", "addopts=", "-p", "no:randomly", "-p", "no:cacheprovider"],
             cwd=str(scenario),
             stdin=subprocess.DEVNULL,
             capture_output=True,

@@ -2,7 +2,7 @@
 
 import re
 
-from report.ast_utils import _dedup_preserve_order
+from pytest_flaky_triage_report.ast_utils import _dedup_preserve_order
 
 ALL_CAUSE_CATEGORIES = (
     "unseeded_randomness",

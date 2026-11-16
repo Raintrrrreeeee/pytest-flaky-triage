@@ -23,6 +23,11 @@ import subprocess
 import sys
 import time
 
+try:
+    import pytest
+except ImportError:  # pragma: no cover
+    pytest = None
+
 if hasattr(time, "tzset"):
     try:
         time.tzset()
@@ -96,6 +101,7 @@ def pytest_unconfigure(config):
         _STATE["events_handle"] = None
 
 
+@(pytest.hookimpl(trylast=True) if pytest is not None else (lambda fn: fn))
 def pytest_collection_modifyitems(session, config, items):
     order_file = _STATE.get("order_file")
     if order_file:
@@ -128,6 +134,8 @@ def pytest_runtest_logstart(nodeid, location):
 def pytest_runtest_logreport(report):
     outcome = None
     has_xfail = hasattr(report, "wasxfail")
+    longrepr_str = str(getattr(report, "longrepr", "") or "")
+    is_strict_xpass = "[XPASS(strict)]" in longrepr_str
     if report.when == "setup":
         if report.failed:
             outcome = "error"
@@ -137,7 +145,10 @@ def pytest_runtest_logreport(report):
         if report.passed:
             outcome = "xpassed" if has_xfail else "passed"
         elif report.failed:
-            outcome = "xfailed" if has_xfail else "failed"
+            if is_strict_xpass:
+                outcome = "xpassed"
+            else:
+                outcome = "xfailed" if has_xfail else "failed"
         elif report.skipped:
             outcome = "xfailed" if has_xfail else "skipped"
     elif report.when == "teardown":

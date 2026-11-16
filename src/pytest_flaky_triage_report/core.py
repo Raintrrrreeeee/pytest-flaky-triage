@@ -507,7 +507,29 @@ def generate_report(diagnosis, project_dir=None):
     runs_by_id = {r["run_id"]: r for r in diagnosis["runs"]}
     enriched_tests = []
     for test in diagnosis["tests"]:
-        source_info = inspect_test_source(test["test_id"], project_dir=project_dir)
+        polluters = []
+        for cause in test.get("suspected_causes") or []:
+            for p_id in cause.get("suspected_polluters") or []:
+                if isinstance(p_id, str) and p_id not in polluters:
+                    polluters.append(p_id)
+            reason_str = cause.get("reason") or ""
+            if "Suspected polluting predecessor(s): " in reason_str:
+                _, p_part = reason_str.split("Suspected polluting predecessor(s): ", 1)
+                for p_id in p_part.rstrip(".").split(","):
+                    p_clean = p_id.strip()
+                    if p_clean and p_clean not in polluters:
+                        polluters.append(p_clean)
+        if polluters:
+            try:
+                source_info = inspect_test_source(
+                    test["test_id"],
+                    project_dir=project_dir,
+                    suspected_polluters=polluters,
+                )
+            except TypeError:
+                source_info = inspect_test_source(test["test_id"], project_dir=project_dir)
+        else:
+            source_info = inspect_test_source(test["test_id"], project_dir=project_dir)
         resolution = disambiguate_causes(test["suspected_causes"], source_info)
         test["resolution"] = resolution
         enriched_tests.append({

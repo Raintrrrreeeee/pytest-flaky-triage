@@ -3,7 +3,7 @@
 import ast
 import re
 
-from report.ast_utils import (
+from pytest_flaky_triage_report.ast_utils import (
     AIOHTTP_TARGETS,
     ASYNC_CONCURRENCY_FUNCTIONS,
     ASYNC_CONCURRENCY_MODULES,
@@ -1351,6 +1351,43 @@ def _collect_teardown_clear_calls(func_node, is_teardown_func=False):
     return exempt_attr_ids
 
 
+_READONLY_MODULE_GLOBALS = frozenset({
+    "logger",
+    "log",
+    "LOGGER",
+    "LOG",
+    "__all__",
+    "__path__",
+    "__spec__",
+    "__loader__",
+    "__package__",
+})
+
+_READONLY_GLOBAL_CALLS = frozenset({
+    "re.compile",
+    "compile",
+    "logging.getLogger",
+    "getLogger",
+    "Path",
+    "pathlib.Path",
+    "PurePath",
+    "PosixPath",
+    "WindowsPath",
+    "namedtuple",
+    "collections.namedtuple",
+    "TypeVar",
+    "typing.TypeVar",
+    "ParamSpec",
+    "NewType",
+    "Enum",
+    "IntEnum",
+    "StrEnum",
+    "Flag",
+    "IntFlag",
+    "frozenset",
+})
+
+
 def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
     """Return list of shared_state_interference indicator dicts for module_globals accessed/mutated in func_node."""
     global_decls = {
@@ -1360,15 +1397,41 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
         for name in node.names
     }
     local_assigned_names = set()
+    args_obj = getattr(func_node, "args", None)
+    if args_obj is not None:
+        for arg in (
+            list(getattr(args_obj, "posonlyargs", []))
+            + list(getattr(args_obj, "args", []))
+            + list(getattr(args_obj, "kwonlyargs", []))
+        ):
+            if arg.arg not in global_decls:
+                local_assigned_names.add(arg.arg)
+        for special_arg in (getattr(args_obj, "vararg", None), getattr(args_obj, "kwarg", None)):
+            if special_arg is not None and special_arg.arg not in global_decls:
+                local_assigned_names.add(special_arg.arg)
+
     for node in ast.walk(func_node):
         targets, val = _extract_assign_targets_and_value(node)
         if targets and val is not None:
             for target in targets:
                 if isinstance(target, ast.Name) and target.id not in global_decls:
                     local_assigned_names.add(target.id)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            for sub_t in ast.walk(node.target):
+                if isinstance(sub_t, ast.Name) and isinstance(sub_t.ctx, ast.Store) and sub_t.id not in global_decls:
+                    local_assigned_names.add(sub_t.id)
 
     is_teardown_fn = getattr(func_node, "name", "") in TEARDOWN_METHODS
     exempt_attr_ids = _collect_teardown_clear_calls(func_node, is_teardown_func=is_teardown_fn)
+    compound_name_ids = {
+        id(node.value)
+        for node in ast.walk(func_node)
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.value, ast.Name)
+    } | {
+        id(node.func)
+        for node in ast.walk(func_node)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
 
     shared_hits = []
     for node in ast.walk(func_node):
@@ -1381,6 +1444,19 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
         elif isinstance(node, ast.Global):
             for var_name in node.names:
                 if var_name in module_globals:
+                    shared_hits.append((node.lineno, var_name))
+        elif (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and id(node) not in compound_name_ids
+        ):
+            var_name = node.id
+            if var_name in module_globals and var_name not in local_assigned_names:
+                _, call_head = module_globals[var_name]
+                if (
+                    var_name not in _READONLY_MODULE_GLOBALS
+                    and (call_head or "") not in _READONLY_GLOBAL_CALLS
+                ):
                     shared_hits.append((node.lineno, var_name))
     shared_hits.sort(key=lambda item: item[0])
     seen_shared = set()
