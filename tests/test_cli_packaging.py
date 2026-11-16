@@ -147,7 +147,7 @@ def test_runner_cleans_up_temp_files_on_keyboard_interrupt(tmp_path, monkeypatch
     assert rc == 130
     captured = capsys.readouterr()
     assert (
-        f"Interrupted by user (Ctrl+C). Partial logs and results (if any) are in {out_dir}. "
+        f"Interrupted by user (Ctrl+C). Partial logs and results (if any) are in {out_dir.resolve()}. "
         "To resume or inspect existing data without re-running pytest, use --report-only."
     ) in captured.err
 

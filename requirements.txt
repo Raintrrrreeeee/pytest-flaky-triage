@@ -1,1 +1,2 @@
 pytest>=7.4
+tzdata>=2023.3; platform_system == 'Windows'

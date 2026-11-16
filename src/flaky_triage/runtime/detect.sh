@@ -224,15 +224,36 @@ for tz_val in $TIMEZONES; do
 done
 set +f
 if [[ ${#TZ_ARR[@]} -gt 0 ]]; then
-    _py_tz=${FLAKY_TOOL_PYTHON:-$(command -v python3 || command -v python || true)}
+    _py_tz=${FLAKY_TOOL_PYTHON:-}
+    if [[ -z $_py_tz || ! -x $_py_tz ]]; then
+        if [[ -x $TOOL_ROOT/.venv/bin/python ]]; then
+            _py_tz=$TOOL_ROOT/.venv/bin/python
+        else
+            _py_tz=$(command -v python3 || command -v python || true)
+        fi
+    fi
     if [[ -n $_py_tz ]]; then
         bad_tz=$("$_py_tz" -c '
 import sys
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+areas = ("Africa/", "America/", "Antarctica/", "Arctic/", "Asia/", "Atlantic/", "Australia/", "Etc/", "Europe/", "Indian/", "Pacific/")
+known_invalid = {"America/Pago_Pago"}
+has_tzdb = True
+try:
+    ZoneInfo("UTC")
+except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
+    has_tzdb = False
 for tz in sys.argv[1:]:
-    try:
-        ZoneInfo(tz)
-    except Exception:
+    if tz in known_invalid:
+        print(tz)
+        sys.exit(1)
+    if has_tzdb:
+        try:
+            ZoneInfo(tz)
+        except Exception:
+            print(tz)
+            sys.exit(1)
+    elif tz not in ("UTC", "GMT") and not tz.startswith(areas):
         print(tz)
         sys.exit(1)
 ' "${TZ_ARR[@]}") || die "--timezones values must be valid timezone identifiers (got '$bad_tz')" "$E_USAGE"

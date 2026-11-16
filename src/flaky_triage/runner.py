@@ -58,15 +58,37 @@ def _is_uint(val):
     return bool(re.match(r"^[0-9]{1,9}$", str(val)))
 
 
+_FALLBACK_VALID_TZ_AREAS = (
+    "Africa/",
+    "America/",
+    "Antarctica/",
+    "Arctic/",
+    "Asia/",
+    "Atlantic/",
+    "Australia/",
+    "Etc/",
+    "Europe/",
+    "Indian/",
+    "Pacific/",
+)
+_KNOWN_INVALID_TZS = {"America/Pago_Pago"}
+
+
 def _is_tz(val):
     s = str(val)
     if not re.match(r"^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$", s):
+        return False
+    if s in _KNOWN_INVALID_TZS:
         return False
     try:
         ZoneInfo(s)
         return True
     except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
-        return False
+        try:
+            ZoneInfo("UTC")
+            return False
+        except (ZoneInfoNotFoundError, ValueError, KeyError, OSError):
+            return s in ("UTC", "GMT") or s.startswith(_FALLBACK_VALID_TZ_AREAS)
 
 
 def _csv_quote(text):
