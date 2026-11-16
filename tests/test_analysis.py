@@ -530,6 +530,77 @@ def test_persistent_self_pollution_detected(tmp_path):
     assert "after initial state pollution" in shared[0]["reason"]
 
 
+def test_multi_isolated_runs_mixed_detects_internal_randomness_or_race(tmp_path):
+    """When suite runs all pass but multiple isolated runs of the same test vary,
+    infer unseeded_randomness / race_conditions rather than consumer_isolation."""
+    cases = [
+        ("repeat", "1", "passed"),
+        ("repeat", "2", "passed"),
+        ("repeat", "3", "passed"),
+        ("hashseed", "1", "passed"),
+        ("order", "reverse", "passed"),
+        ("tz", "UTC", "passed"),
+        ("isolated", "alone", "passed"),
+        ("isolated", "alone", "passed"),
+        ("isolated", "alone", "failed"),
+        ("isolated", "alone", "passed"),
+        ("isolated", "alone", "passed"),
+    ]
+    path = write_matrix(tmp_path, cases, test_id="tests/test_iso.py::test_iso_mixed")
+    test = read_analysis(path)["tests"][0]
+    assert test["overall"]["verdict"] == "flaky"
+    assert test["suspected_causes"] == [
+        {
+            "candidates": ["unseeded_randomness", "race_conditions"],
+            "status": "ambiguous",
+            "reason": "Outcomes vary across repeated isolated executions of this single test under the same seed and timezone.",
+            "run_ids": [7, 8, 9, 10, 11],
+        }
+    ]
+
+
+def test_multi_isolated_runs_failure_prevents_false_victim_isolation(tmp_path):
+    """When a test fails in suite runs and has at least one failure across multiple
+    isolated runs (mixed isolated outcomes), it must not be misclassified as victim_isolation."""
+    cases = [
+        ("repeat", "1", "failed"),
+        ("repeat", "2", "failed"),
+        ("order", "reverse", "failed"),
+        ("isolated", "alone", "passed"),
+        ("isolated", "alone", "passed"),
+        ("isolated", "alone", "failed"),
+        ("isolated", "alone", "passed"),
+        ("isolated", "alone", "passed"),
+    ]
+    path = write_matrix(tmp_path, cases, test_id="tests/test_iso.py::test_false_victim")
+    test = read_analysis(path)["tests"][0]
+    assert test["overall"]["verdict"] == "flaky"
+    cand_lists = [c["candidates"] for c in test["suspected_causes"]]
+    assert cand_lists == [["unseeded_randomness", "race_conditions"]]
+    assert ["shared_state_interference"] not in cand_lists
+
+
+def test_multi_isolated_runs_consistent_failure_confirms_consumer_isolation(tmp_path):
+    """When a test passes in suite runs and fails consistently across all N isolated runs,
+    confirm consumer_isolation (shared_state_interference)."""
+    cases = [
+        ("repeat", "1", "passed"),
+        ("repeat", "2", "passed"),
+        ("order", "reverse", "passed"),
+        ("isolated", "alone", "failed"),
+        ("isolated", "alone", "failed"),
+        ("isolated", "alone", "failed"),
+        ("isolated", "alone", "failed"),
+        ("isolated", "alone", "failed"),
+    ]
+    path = write_matrix(tmp_path, cases, test_id="tests/test_iso.py::test_state_consumer")
+    test = read_analysis(path)["tests"][0]
+    assert test["overall"]["verdict"] == "flaky"
+    shared = [c for c in test["suspected_causes"] if c["candidates"] == ["shared_state_interference"]]
+    assert len(shared) == 1
+    assert "isolated executions differ from suite executions" in shared[0]["reason"]
+
+
 def test_disjunctive_multi_polluters_and_one_way_polluter_preserved(tmp_path):
     """BUG-07 regression:
     Scenario A: two independent one-way polluters (test_polluter_a, test_polluter_b) alternate

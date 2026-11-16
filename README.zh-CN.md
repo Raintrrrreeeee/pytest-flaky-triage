@@ -70,7 +70,7 @@
 - **内置 Pytest Sideband Hook 插件**：直接挂载 `pytest` 生命周期钩子（`setup` / `call` / `teardown`），将每个测试的真实执行结果实时写入独立的结构化数据流，不受目标项目 `pytest.ini` 配置（如 `-q` 静默输出、进度条插件、多行报错堆栈、带空格或特殊符号的参数化测试名）干扰；同时保留加固版日志解析器作为兜底。
 - **内存级 `O(N)` 顺序重排与冲突插件屏蔽**：在 `pytest_collection_modifyitems` 阶段按指定顺序文件直接重排测试，并自动屏蔽目标环境中可能干扰实验控制的第三方插件（如 `pytest-randomly`、`pytest-xdist`、`pytest-sugar`、`pytest-cov`、`pytest-rerunfailures`、`pytest-order`）。
 - **macOS / Linux / Windows 跨平台进程树超时保护**：每次运行均在独立进程组中启动并关闭 `stdin`，超时后自动清理整棵进程树（退出码 `124`），在 **macOS、Linux 与 Windows（PowerShell / CMD / Git Bash）** 下均可防止死循环或残留后台线程卡死终端。
-- **大型项目加速与按需筛选**：支持 `--target SUBPATH` 指定子目录或文件、`-k EXPR` 关键词过滤、`--python PATH` 指定外部虚拟环境解释器，以及 `--isolated-scope smart` 智能隔离模式（仅对在套件运行中失败或波动的测试执行单测进程隔离，大幅缩短大型项目耗时）。
+- **大型项目加速与高强度深度检测预设（`--intensive`）**：支持 `--target SUBPATH` 指定子目录或文件、`-k EXPR` 关键词过滤、`--python PATH` 指定外部虚拟环境解释器、`--isolated-scope smart` 智能隔离模式（仅对在套件运行中失败或波动的测试执行单测进程隔离）、`--isolated-runs N`（对每个待隔离测试连续独立运行 `N` 轮以捕捉无套件干扰下的自身低频闪烁），以及 `--intensive` 深度检测预设（一键执行 `30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs (all tests)`）。
 
 ### 第二阶段：统计稳定性评分与污染源定位（`src/analysis/`）
 - **抗崩溃干扰的稳定性评分**：基于有效运行计算 `passed / (passed + failed + error)` 稳定性得分；当某轮运行发生中途崩溃、超时或未跑完时，已完成测试仍计入得分，但该轮会被严格排除在因果推断之外，杜绝残缺数据导致的误判。
@@ -194,6 +194,10 @@ pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 pytest-flaky-triage --project /path/to/project --out ./out
 pytest-flaky-triage --project /path/to/project --out ./out --lang zh   # 生成简体中文报告
 
+# 1b. 深度检测高强度预设模式（30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs 全量测试独立隔离）
+pytest-flaky-triage --project /path/to/project --intensive --out ./out --lang zh
+pytest-flaky-triage --project /path/to/project --isolated-runs 5 --out ./out --lang zh
+
 # 2. 内置演示靶场一键体验（自动对内置的 22 个基准测试执行全流程诊断）
 pytest-flaky-triage --demo
 pytest-flaky-triage --demo --lang zh
@@ -234,7 +238,7 @@ scripts/detect.sh --project /path/to/project [options]
 | `hashseed` | 逐轮切换 `PYTHONHASHSEED` | 测试执行顺序、`TZ=UTC` | 无序集合/字典哈希迭代顺序敏感（`hash_order_sensitivity`） |
 | `order` | 逆序 + 多组固定种子的随机打乱顺序 | `PYTHONHASHSEED=0`、`TZ=UTC` | 测试执行顺序依赖、共享状态污染（`shared_state_interference`） |
 | `tz` | 切换 `TZ` 环境变量（`UTC`、`Pacific/Kiritimati`、`America/Pago_Pago`） | 测试执行顺序、`PYTHONHASHSEED=0` | 本地时间与跨日边界敏感（`timezone_sensitivity`） |
-| `isolated` | 每个测试在独立子进程中单独运行 | `PYTHONHASHSEED=0`、`TZ=UTC` | 共享状态干扰（被污染受害者 或 缺失初始化的状态依赖者） |
+| `isolated` | 每个测试在独立子进程中单独运行（可通过 `--isolated-runs N` 执行多轮） | `PYTHONHASHSEED=0`、`TZ=UTC` | 共享状态干扰（被污染受害者 或 缺失初始化的状态依赖者）及单测自身随机/并发闪烁 |
 
 ### 参数列表
 
@@ -242,13 +246,14 @@ scripts/detect.sh --project /path/to/project [options]
 |---|---|---|
 | `--project PATH` | （必填，除非使用 `--demo`） | 待检测的目标 `pytest` 项目根目录路径 |
 | `--demo` | 关闭 | 一键运行内置的 22 个电商基准测试演示靶场（`scenario/`），输出至 `./out` |
+| `--intensive` | 关闭 | 深度检测高强度预设：执行 `30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs (all tests)`；同时显式传入的单项参数优先覆盖预设值 |
 | `--target SUBPATH` | （整个项目） | 仅收集并检测项目下指定的测试文件、子目录或节点 ID |
 | `-k EXPR` | （无） | 仅运行匹配 `pytest -k EXPR` 表达式的测试 |
-| `--repeats N` | `10` | `repeat` 基准重复运行轮数（`N >= 1`） |
-| `--hash-seeds "S..."` | `"1 2 3 4 5 6 7 8"` | `PYTHONHASHSEED` 种子列表，每个种子运行一轮；传 `""` 可跳过 |
-| `--orders K` | `5` | `order` 阶段随机打乱顺序的轮数（外加 1 轮完全逆序）；传 `0` 可跳过 |
+| `--repeats N` | `10`（`--intensive` 下为 `30`） | `repeat` 基准重复运行轮数（`N >= 1`） |
+| `--hash-seeds "S..."` | `"1 2 3 4 5 6 7 8"`（`--intensive` 下为 `1..15`） | `PYTHONHASHSEED` 种子列表，每个种子运行一轮；传 `""` 可跳过（亦支持 `--hashseeds N`） |
+| `--orders K` | `5`（`--intensive` 下为 `15`） | `order` 阶段随机打乱顺序的轮数（外加 1 轮完全逆序）；传 `0` 可跳过（亦支持 `--shuffles K`） |
 | `--timezones "TZ..."` | `"UTC Pacific/Kiritimati America/Pago_Pago"` | `tz` 阶段时区列表，每个时区运行一轮；传 `""` 可跳过 |
-| `--isolated N` | `1` | 每个测试单独隔离运行的轮数；传 `0` 可跳过 |
+| `--isolated-runs N` | `1`（`--intensive` 下为 `5`） | 每个测试单独独立隔离运行的轮数（`N >= 1`；亦兼容 `--isolated N`，传 `0` 跳过） |
 | `--isolated-scope MODE` | `all` | `all` 对所有测试执行单测隔离；`smart` 仅对前面套件运行中出现失败或波动的测试执行隔离 |
 | `--timeout SECONDS` | `60` | 单轮 `pytest` 运行的最大超时秒数 |
 | `--out DIR` | `out/` | 诊断产物输出目录（自动拦截 `/`、`$HOME`、软链接及包含目标项目的危险路径） |

@@ -153,6 +153,7 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
     ]
     groups = {c: [r for r in usable if r["condition"] == c] for c in CONDITIONS}
     repeat = groups["repeat"]
+    isolated = groups["isolated"]
     causes = []
 
     def add(candidates, reason, evidence, polluters=None):
@@ -167,11 +168,18 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
         causes.append(entry)
 
     repeat_mixed = _mixed(repeat)
+    iso_mixed = _mixed(isolated)
     if repeat_mixed:
         add(
             ["unseeded_randomness", "race_conditions"],
             "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.",
             repeat,
+        )
+    elif iso_mixed:
+        add(
+            ["unseeded_randomness", "race_conditions"],
+            "Outcomes vary across repeated isolated executions of this single test under the same seed and timezone.",
+            isolated,
         )
 
     # A repeat baseline guards against labelling ordinary random variation as a
@@ -182,7 +190,6 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
     hash_rows = groups["hashseed"]
     order_rows = groups["order"]
     tz_rows = groups["tz"]
-    isolated = groups["isolated"]
     suite = [r for r in usable if r["condition"] in ("repeat", "order")]
 
     hash_effect = _between_values(hash_rows, baseline=repeat)
@@ -200,6 +207,7 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
     consumer_isolation = (
         bool(isolated)
         and all(r["outcome"] != "passed" for r in isolated)
+        and not iso_mixed
         and (
             all(r["outcome"] == "passed" for r in suite)
             or (
@@ -225,16 +233,17 @@ def _causes(rows, runs, verdict, test_id=None, precedents_by_run=None):
         and all(r["outcome"] in ("failed", "error") for r in repeat[1:])
     )
     strong_shared_signal = (
-        not repeat_mixed
+        (not repeat_mixed and not iso_mixed)
         or bool(polluters)
         or (
             not _mixed(hash_rows)
             and not _mixed(order_rows)
+            and not iso_mixed
             and persistent_self_pollution
         )
     )
 
-    if repeat_mixed:
+    if repeat_mixed or iso_mixed:
         if (order_effect or isolation_effect) and strong_shared_signal:
             reason = (
                 "Outcomes differ across test orders, or isolated executions pass while suite executions fail after initial state pollution."

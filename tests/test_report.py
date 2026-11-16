@@ -1204,6 +1204,9 @@ def test_chinese_report_rendering_and_cli(tmp_path):
     diagnosis["tests"][1]["test_id"] = "tests/test_cart.py::test_get_daily_quote"
     second_rand = copy.deepcopy(diagnosis["tests"][1])
     second_rand["test_id"] = "tests/test_cart.py::test_select_promo_banner"
+    second_rand["suspected_causes"][0]["reason"] = (
+        "Outcomes vary across repeated isolated executions of this single test under the same seed and timezone."
+    )
     conflict_test = copy.deepcopy(diagnosis["tests"][1])
     conflict_test["test_id"] = "tests/test_cart.py::test_default_avatar_assignment"
     conflict_test["suspected_causes"] = [
@@ -1225,6 +1228,7 @@ def test_chinese_report_rendering_and_cli(tmp_path):
     assert "## 2. 测试诊断汇总表" in md_zh
     assert "## 3. 诊断详情与证据溯源" in md_zh
     assert "未固定随机种子" in md_zh
+    assert "在相同种子和时区下，该测试的多次独立隔离执行结果发生变化。" in md_zh
     assert "业务侧 (Code Side)" in md_zh
     assert "AST 消歧 *" in md_zh
     # Heading fault side must NOT repeat when multiple tests share the same fault side

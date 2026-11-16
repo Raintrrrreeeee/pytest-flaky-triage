@@ -45,6 +45,8 @@ def detect(*args):
         (["--project", GOOD_PROJECT, "--out", "/"], "--out must not be / or HOME"),
         (["--project", GOOD_PROJECT, "--out", str(ROOT)], "--out must be a sub-folder"),
         (["--project", GOOD_PROJECT, "--isolated-scope", "invalid"], "--isolated-scope must be"),
+        (["--project", GOOD_PROJECT, "--isolated-runs", "0"], "--isolated-runs must be"),
+        (["--project", GOOD_PROJECT, "--" + "fast"], "unknown option"),
         (["--project", GOOD_PROJECT, "--frobnicate"], "unknown option"),
         (["--project"], "needs a value"),
     ],
@@ -324,6 +326,52 @@ def test_pure_python_runner_cross_platform_mode(tmp_path):
     assert (out_dir / "diagnosis.json").is_file()
     report_text = (out_dir / "report.md").read_text(encoding="utf-8")
     assert "# 测试稳定性诊断报告" in report_text
+
+
+def test_intensive_preset_and_isolated_runs(tmp_path):
+    """Verify --intensive preset with explicit overrides and multi-round --isolated-runs."""
+    import csv
+
+    help_res = detect("--help")
+    assert help_res.returncode == 0
+    assert "--intensive" in help_res.stdout
+    assert "--isolated-runs" in help_res.stdout
+
+    tiny_proj = tmp_path / "tiny_proj"
+    (tiny_proj / "tests").mkdir(parents=True)
+    (tiny_proj / "tests" / "test_tiny.py").write_text(
+        "def test_a():\n    assert True\n\ndef test_b():\n    assert True\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "intensive_out"
+    res = detect(
+        "--project",
+        str(tiny_proj),
+        "--out",
+        str(out_dir),
+        "--intensive",
+        "--repeats",
+        "2",
+        "--hashseeds",
+        "1",
+        "--shuffles",
+        "1",
+        "--timezones",
+        "UTC",
+        "--isolated-runs",
+        "2",
+        "--no-report",
+    )
+    assert res.returncode == 0, res.stderr
+    with (out_dir / "results.csv").open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    iso_a = [r for r in rows if r["condition"] == "isolated" and r["test_id"].endswith("::test_a")]
+    iso_b = [r for r in rows if r["condition"] == "isolated" and r["test_id"].endswith("::test_b")]
+    assert len(iso_a) == 2
+    assert len(iso_b) == 2
+    assert len({r["run_id"] for r in iso_a}) == 2
+    assert len({r["run_id"] for r in iso_b}) == 2
+
 
 
 

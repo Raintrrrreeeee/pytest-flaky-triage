@@ -93,9 +93,13 @@ Options:
                              0 to skip (default 5)
   --timezones "TZ..."        TZ environment values, one run each; "" to skip
                              (default "UTC Pacific/Kiritimati America/Pago_Pago")
-  --isolated N               runs of each test on its own; 0 to skip (default 1)
+  --isolated-runs N          isolated runs per test, N >= 1 (default 1;
+                             --isolated N also accepted, 0 to skip)
   --isolated-scope MODE      'all' (every test) or 'smart' (only tests with
                              suite failures) (default all)
+  --intensive                deep-dive preset: 30 repeats, 15 hashseeds,
+                             15 shuffles, 5 isolated-runs across all tests
+                             (explicit flags override preset values)
   --timeout SECONDS          limit for a single pytest run (default 60)
   --out DIR                  output folder (default out/)
   --python PATH              Python interpreter with pytest installed for target
@@ -398,11 +402,18 @@ def run_detect(argv=None):
     report_lang = "en"
     do_report = True
     report_only = False
+    intensive = False
+    repeats_set = False
+    hash_seeds_set = False
+    orders_set = False
+    isolated_set = False
+    isolated_runs_flag = False
+    isolated_scope_set = False
 
     value_opts = {
-        "--project", "--target", "-k", "--repeats", "--hash-seeds",
-        "--orders", "--timezones", "--isolated", "--isolated-scope", "--timeout",
-        "--out", "--python", "--lang",
+        "--project", "--target", "-k", "--repeats", "--hash-seeds", "--hashseeds",
+        "--orders", "--shuffles", "--timezones", "--isolated", "--isolated-runs",
+        "--isolated-scope", "--timeout", "--out", "--python", "--lang",
     }
 
     idx = 0
@@ -411,6 +422,10 @@ def run_detect(argv=None):
         if tok in ("-h", "--help"):
             sys.stdout.write(_usage_text(cli_usage))
             return 0
+        if tok == "--intensive":
+            intensive = True
+            idx += 1
+            continue
         if tok == "--no-report":
             do_report = False
             idx += 1
@@ -436,16 +451,34 @@ def run_detect(argv=None):
             keyword_expr = val
         elif tok == "--repeats":
             repeats_raw = val
+            repeats_set = True
         elif tok == "--hash-seeds":
             hash_seeds_raw = val
-        elif tok == "--orders":
+            hash_seeds_set = True
+        elif tok == "--hashseeds":
+            if val in ("", "0"):
+                hash_seeds_raw = ""
+            elif _is_uint(val) and int(val, 10) >= 1:
+                hash_seeds_raw = " ".join(str(i) for i in range(1, int(val, 10) + 1))
+            else:
+                hash_seeds_raw = val
+            hash_seeds_set = True
+        elif tok in ("--orders", "--shuffles"):
             orders_raw = val
+            orders_set = True
         elif tok == "--timezones":
             timezones_raw = val
         elif tok == "--isolated":
             isolated_raw = val
+            isolated_set = True
+            isolated_runs_flag = False
+        elif tok == "--isolated-runs":
+            isolated_raw = val
+            isolated_set = True
+            isolated_runs_flag = True
         elif tok == "--isolated-scope":
             isolated_scope = val
+            isolated_scope_set = True
         elif tok == "--timeout":
             timeout_raw = val
         elif tok == "--out":
@@ -455,6 +488,18 @@ def run_detect(argv=None):
         elif tok == "--lang":
             report_lang = val
         idx += 2
+
+    if intensive:
+        if not repeats_set:
+            repeats_raw = "30"
+        if not hash_seeds_set:
+            hash_seeds_raw = "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"
+        if not orders_set:
+            orders_raw = "15"
+        if not isolated_set:
+            isolated_raw = "5"
+        if not isolated_scope_set:
+            isolated_scope = "all"
 
     if not project_raw:
         sys.stderr.write(_usage_text(cli_usage))
@@ -468,7 +513,10 @@ def run_detect(argv=None):
         return die(f"--repeats must be a whole number >= 1 (got '{repeats_raw}')")
     if not _is_uint(orders_raw):
         return die(f"--orders must be a whole number >= 0 (got '{orders_raw}')")
-    if not _is_uint(isolated_raw):
+    if isolated_runs_flag:
+        if not _is_uint(isolated_raw) or int(isolated_raw, 10) < 1:
+            return die(f"--isolated-runs must be a whole number >= 1 (got '{isolated_raw}')")
+    elif not _is_uint(isolated_raw):
         return die(f"--isolated must be a whole number >= 0 (got '{isolated_raw}')")
     if not _is_uint(timeout_raw) or int(timeout_raw, 10) < 1:
         return die(f"--timeout must be a whole number of seconds >= 1 (got '{timeout_raw}')")

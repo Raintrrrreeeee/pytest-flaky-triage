@@ -70,7 +70,7 @@ Each diagnostic section further pinpoints the **polluting predecessor test** and
 - **Sideband Pytest Hook Plugin**: Captures per-test outcomes (`setup` / `call` / `teardown`) directly from pytest hooks into a structured sideband event stream, remaining accurate regardless of project `pytest.ini` flags (`-q`, custom progress bars, multiline failure tracebacks, or parameterized IDs containing spaces and brackets), with a hardened AWK/regex log-parser fallback.
 - **In-Memory `O(N)` Reordering & Plugin Neutralization**: Reorders tests in-place via `pytest_collection_modifyitems` and automatically disables conflicting third-party plugins (`pytest-randomly`, `pytest-xdist`, `pytest-sugar`, `pytest-cov`, `pytest-rerunfailures`, `pytest-order`) during matrix runs.
 - **Cross-Platform Process-Group Timeout & Hang Protection**: Executes every run in an isolated process group with `stdin` closed and process-tree termination on timeout (exit code `124`), cleanly terminating hung background threads or child processes on **macOS, Linux, and Windows (PowerShell / CMD / Git Bash)**.
-- **Large-Suite Acceleration**: Supports `--target SUBPATH`, `-k EXPR` filtering, `--python PATH` cross-environment execution, and `--isolated-scope smart` (running expensive single-test process isolation only for tests that failed or flipped in suite runs).
+- **Large-Suite Acceleration & Deep-Dive Preset (`--intensive`)**: Supports `--target SUBPATH`, `-k EXPR` filtering, `--python PATH` cross-environment execution, `--isolated-scope smart` (running expensive single-test process isolation only for tests that failed or flipped in suite runs), `--isolated-runs N` (running each isolated test `N` times to catch internal low-frequency flakiness without suite interference), and `--intensive` (`30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs (all tests)`).
 
 ### Stage 2 — Statistical Scoring & Polluter Inference (`src/analysis/`)
 - **Crash-Resilient Stability Scoring**: Computes `passed / (passed + failed + error)` across valid observations while preventing incomplete, timed-out, or crashed runs from producing false condition attributions.
@@ -194,6 +194,10 @@ pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 pytest-flaky-triage --project /path/to/project --out ./out
 pytest-flaky-triage --project /path/to/project --out ./out --lang zh   # Simplified Chinese report
 
+# 1b. Deep-dive intensive preset (30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs across all tests)
+pytest-flaky-triage --project /path/to/project --intensive --out ./out
+pytest-flaky-triage --project /path/to/project --isolated-runs 5 --out ./out
+
 # 2. Built-in 22-test benchmark demo mode
 pytest-flaky-triage --demo
 pytest-flaky-triage --demo --lang zh
@@ -234,7 +238,7 @@ Each condition changes one factor and keeps the others fixed:
 | `hashseed` | `PYTHONHASHSEED`, one run per seed | test order, `TZ=UTC` | set / hash-order dependence |
 | `order` | test order: reversed, then seeded shuffles (`O(N)` hook reorder) | `PYTHONHASHSEED=0`, `TZ=UTC` | order dependence, shared state |
 | `tz` | `TZ` environment variable (`UTC`, `Pacific/Kiritimati`, `America/Pago_Pago`) | test order, `PYTHONHASHSEED=0` | naive local-time / UTC date-boundary sensitivity |
-| `isolated` | each test runs alone in its own process | `PYTHONHASHSEED=0`, `TZ=UTC` | shared state (victim or state-consumer) |
+| `isolated` | each test runs alone in its own process (`--isolated-runs N` times) | `PYTHONHASHSEED=0`, `TZ=UTC` | shared state (victim or state-consumer) & internal randomness/races |
 
 ### Command-Line Options
 
@@ -242,13 +246,14 @@ Each condition changes one factor and keeps the others fixed:
 |---|---|---|
 | `--project PATH` | (required unless `--demo`) | pytest project root directory to investigate |
 | `--demo` | off | run the built-in 22-test benchmark suite (`scenario/`) and write outputs to `./out` |
+| `--intensive` | off | deep-dive preset: `30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs (all tests)`; explicit single-condition flags override preset values |
 | `--target SUBPATH` | (entire project) | restrict collection to a specific test file, directory, or node ID |
 | `-k EXPR` | (none) | only collect tests matching pytest keyword expression `EXPR` |
-| `--repeats N` | `10` | plain repeated runs (`N >= 1`) |
-| `--hash-seeds "S..."` | `"1 2 3 4 5 6 7 8"` | `PYTHONHASHSEED` values, one run each; `""` to skip |
-| `--orders K` | `5` | seeded shuffled-order runs plus one reversed run; `0` to skip |
+| `--repeats N` | `10` (`30` with `--intensive`) | plain repeated runs (`N >= 1`) |
+| `--hash-seeds "S..."` | `"1 2 3 4 5 6 7 8"` (`1..15` with `--intensive`) | `PYTHONHASHSEED` values, one run each; `""` to skip (`--hashseeds N` also supported) |
+| `--orders K` | `5` (`15` with `--intensive`) | seeded shuffled-order runs plus one reversed run; `0` to skip (`--shuffles K` also supported) |
 | `--timezones "TZ..."` | `"UTC Pacific/Kiritimati America/Pago_Pago"` | `TZ` timezone values, one run each; `""` to skip |
-| `--isolated N` | `1` | runs of each test on its own; `0` to skip |
+| `--isolated-runs N` | `1` (`5` with `--intensive`) | isolated runs of each test on its own (`N >= 1`; `--isolated N` also accepted, `0` to skip) |
 | `--isolated-scope MODE` | `all` | `all` runs every collected test in isolation; `smart` runs only tests that failed or flipped in earlier conditions |
 | `--timeout SECONDS` | `60` | hard time limit for a single pytest run |
 | `--out DIR` | `out/` | output folder (rejects `/`, `$HOME`, symlinks, and folders containing `--project`) |

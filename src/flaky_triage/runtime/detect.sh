@@ -51,6 +51,13 @@ KEYWORD_EXPR=""
 REPORT=yes
 REPORT_ONLY=no
 REPORT_LANG="en"
+INTENSIVE=no
+REPEATS_SET=no
+HASH_SEEDS_SET=no
+ORDERS_SET=no
+ISOLATED_SET=no
+ISOLATED_RUNS_FLAG=no
+ISOLATED_SCOPE_SET=no
 CLI_USAGE_NAME=${FLAKY_CLI_NAME:-scripts/detect.sh}
 CLI_ERR_NAME=${FLAKY_CLI_NAME:-detect.sh}
 
@@ -72,9 +79,13 @@ Options:
                              0 to skip (default $ORDERS)
   --timezones "TZ..."        TZ environment values, one run each; "" to skip
                              (default "$TIMEZONES")
-  --isolated N               runs of each test on its own; 0 to skip (default $ISOLATED)
+  --isolated-runs N          isolated runs per test, N >= 1 (default $ISOLATED;
+                             --isolated N also accepted, 0 to skip)
   --isolated-scope MODE      'all' (every test) or 'smart' (only tests with
                              suite failures) (default $ISOLATED_SCOPE)
+  --intensive                deep-dive preset: 30 repeats, 15 hashseeds,
+                             15 shuffles, 5 isolated-runs across all tests
+                             (explicit flags override preset values)
   --timeout SECONDS          limit for a single pytest run (default $TIMEOUT)
   --out DIR                  output folder (default out/)
   --python PATH              Python interpreter with pytest installed for target
@@ -111,6 +122,7 @@ ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help) usage; exit 0 ;;
+        --intensive) INTENSIVE=yes; shift; continue ;;
         --no-report) REPORT=no; shift; continue ;;
         --report-only) REPORT_ONLY=yes; shift; continue ;;
         --*=*)
@@ -120,7 +132,7 @@ while [[ $# -gt 0 ]]; do
             set -- "$opt_name" "$opt_val" "$@"
             continue
             ;;
-        --project|--target|-k|--repeats|--hash-seeds|--orders|--timezones|--isolated|--isolated-scope|--timeout|--out|--python|--lang)
+        --project|--target|-k|--repeats|--hash-seeds|--hashseeds|--orders|--shuffles|--timezones|--isolated|--isolated-runs|--isolated-scope|--timeout|--out|--python|--lang)
             [[ $# -ge 2 ]] || die "$1 needs a value (see --help)"
             ;;
         *) die "unknown option '$1' (see --help)" ;;
@@ -129,12 +141,26 @@ while [[ $# -gt 0 ]]; do
         --project)        PROJECT=$2 ;;
         --target)         TARGET_SUBPATH=$2 ;;
         -k)               KEYWORD_EXPR=$2 ;;
-        --repeats)        REPEATS=$2 ;;
-        --hash-seeds)     HASH_SEEDS=$2 ;;
-        --orders)         ORDERS=$2 ;;
+        --repeats)        REPEATS=$2; REPEATS_SET=yes ;;
+        --hash-seeds)     HASH_SEEDS=$2; HASH_SEEDS_SET=yes ;;
+        --hashseeds)
+            if [[ -z $2 || $2 == 0 ]]; then
+                HASH_SEEDS=""
+            elif is_uint "$2" && [[ $((10#$2)) -ge 1 ]]; then
+                HASH_SEEDS=""
+                for ((_hs_i = 1; _hs_i <= $((10#$2)); _hs_i++)); do
+                    HASH_SEEDS="${HASH_SEEDS:+$HASH_SEEDS }$_hs_i"
+                done
+            else
+                HASH_SEEDS=$2
+            fi
+            HASH_SEEDS_SET=yes
+            ;;
+        --orders|--shuffles) ORDERS=$2; ORDERS_SET=yes ;;
         --timezones)      TIMEZONES=$2 ;;
-        --isolated)       ISOLATED=$2 ;;
-        --isolated-scope) ISOLATED_SCOPE=$2 ;;
+        --isolated)       ISOLATED=$2; ISOLATED_SET=yes; ISOLATED_RUNS_FLAG=no ;;
+        --isolated-runs)  ISOLATED=$2; ISOLATED_SET=yes; ISOLATED_RUNS_FLAG=yes ;;
+        --isolated-scope) ISOLATED_SCOPE=$2; ISOLATED_SCOPE_SET=yes ;;
         --timeout)        TIMEOUT=$2 ;;
         --out)            OUT_DIR=$2 ;;
         --python)         PYTHON=$2 ;;
@@ -143,13 +169,26 @@ while [[ $# -gt 0 ]]; do
     shift 2
 done
 
+if [[ $INTENSIVE == yes ]]; then
+    [[ $REPEATS_SET == yes ]] || REPEATS=30
+    [[ $HASH_SEEDS_SET == yes ]] || HASH_SEEDS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"
+    [[ $ORDERS_SET == yes ]] || ORDERS=15
+    [[ $ISOLATED_SET == yes ]] || ISOLATED=5
+    [[ $ISOLATED_SCOPE_SET == yes ]] || ISOLATED_SCOPE="all"
+fi
+
 [[ -n $PROJECT ]] || { usage >&2; die "--project is required"; }
 [[ -d $PROJECT ]] || die "project folder '$PROJECT' does not exist"
 PROJECT=$(cd -P "$PROJECT" && pwd -P)
 
 is_uint "$REPEATS" || die "--repeats must be a whole number >= 1 (got '$REPEATS')"
 is_uint "$ORDERS" || die "--orders must be a whole number >= 0 (got '$ORDERS')"
-is_uint "$ISOLATED" || die "--isolated must be a whole number >= 0 (got '$ISOLATED')"
+if [[ $ISOLATED_RUNS_FLAG == yes ]]; then
+    is_uint "$ISOLATED" || die "--isolated-runs must be a whole number >= 1 (got '$ISOLATED')"
+    [[ $((10#$ISOLATED)) -ge 1 ]] || die "--isolated-runs must be a whole number >= 1 (got '$ISOLATED')"
+else
+    is_uint "$ISOLATED" || die "--isolated must be a whole number >= 0 (got '$ISOLATED')"
+fi
 is_uint "$TIMEOUT" || die "--timeout must be a whole number of seconds >= 1 (got '$TIMEOUT')"
 case $ISOLATED_SCOPE in
     all|smart) ;;

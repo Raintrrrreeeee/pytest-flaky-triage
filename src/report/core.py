@@ -563,6 +563,9 @@ def _translate_reason_zh(reason):
         "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.": (
             "在相同哈希种子与相同执行顺序下结果仍发生波动；需结合源码 AST 检查区分随机性与并发竞态。"
         ),
+        "Outcomes vary across repeated isolated executions of this single test under the same seed and timezone.": (
+            "在相同种子和时区下，该测试的多次独立隔离执行结果发生变化。"
+        ),
         "Outcomes were uniform during the finite repeat window but flipped across independent perturbations; source investigation is needed to distinguish probabilistic randomness or concurrency races.": (
             "在有限次重复基线中结果一致，但在独立扰动维度间发生翻转；需结合源码 AST 检查区分低概率随机性与并发竞态。"
         ),
