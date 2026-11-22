@@ -2,9 +2,13 @@ name: CI
 
 on:
   push:
-    branches: ["main", "feat/**"]
+    branches: ["main", "feat/**", "fix/**"]
   pull_request:
     branches: ["main"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -27,3 +31,34 @@ jobs:
           python -m pip install -e .
       - name: Run full verification suite
         run: python -m pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
+      - name: Verify CLI entry point
+        run: pytest-flaky-triage --help
+
+  action-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run composite GitHub Action on scenario
+        id: smoke
+        uses: ./
+        with:
+          project: ./scenario
+          out-dir: ./out/ci_action_smoke
+          upload-artifact: "false"
+          fail-on-flaky: "false"
+      - name: Verify Action outputs and step summary
+        shell: bash
+        env:
+          FLAKY_COUNT: ${{ steps.smoke.outputs.flaky-count }}
+          REPORT_PATH: ${{ steps.smoke.outputs.report-path }}
+          DIAGNOSIS_PATH: ${{ steps.smoke.outputs.diagnosis-path }}
+        run: |
+          test -s ./out/ci_action_smoke/report.md
+          test -s "$REPORT_PATH"
+          test -s "$DIAGNOSIS_PATH"
+          test -s "$GITHUB_STEP_SUMMARY"
+          test "${FLAKY_COUNT:-0}" -gt 0

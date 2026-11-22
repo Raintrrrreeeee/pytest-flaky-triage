@@ -185,6 +185,67 @@ pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 
 ---
 
+### GitHub Action (CI Integration)
+
+You can integrate **`pytest-flaky-triage`** directly into your GitHub Actions workflow (`uses: Raintrrrreeeee/pytest-flaky-triage@v2`). When triggered (for example, automatically via `if: failure()` after a failed `pytest` step), the action runs the 3-stage diagnosis, appends `report.md` directly to the **GitHub Actions Job Summary (`$GITHUB_STEP_SUMMARY`)**, and uploads the diagnostic directory as a workflow artifact.
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pytest suite
+        run: pytest
+
+      - name: Run flaky test triage on failure
+        if: failure()
+        id: flaky_triage
+        uses: Raintrrrreeeee/pytest-flaky-triage@v2
+        with:
+          project: "."
+          isolated-scope: "smart"
+          lang: "en"
+          fail-on-flaky: "false"
+          upload-artifact: "true"
+```
+
+#### Action Inputs (`with:`) & Outputs
+
+| Input | Default | Description |
+|---|---|---|
+| `project` | `"."` | Root directory of the target `pytest` project |
+| `target` | `""` | Optional subdirectory, test file, or node ID (`--target`) |
+| `k` | `""` | Optional `pytest -k` expression to filter tests |
+| `intensive` | `"false"` | Enable deep-dive preset (`--intensive`: 30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs) |
+| `isolated-scope` | `"smart"` | Isolation scope: `"smart"` (only tests that failed or flipped) or `"all"` |
+| `lang` | `"en"` | Report language for `report.md` and Job Summary: `"en"` or `"zh"` |
+| `out-dir` | `"./flaky-triage-out"` | Output directory for `report.md`, `diagnosis.json`, CSVs, and logs |
+| `python-executable` | `""` | Optional custom Python interpreter path (`--python`) |
+| `fail-on-flaky` | `"false"` | Exit with non-zero status when flaky tests are detected (`"true"` / `"false"`) |
+| `upload-artifact` | `"true"` | Automatically upload `out-dir` via `actions/upload-artifact@v4` (`"true"` / `"false"`) |
+| `artifact-name` | `"pytest-flaky-triage-report"` | Artifact name when `upload-artifact` is `"true"` |
+
+Action outputs (`steps.<id>.outputs.*`): `report-path`, `diagnosis-path`, `flaky-count`, and `exit-code`.
+
+---
+
 ## CLI Usage & Perturbation Matrix
 
 ### Available Commands & Common Modes
@@ -312,6 +373,7 @@ scenario/                optional 22-test controlled flaky-test benchmark suite 
 docs/
   contracts.md           Stage 1 / Stage 2 / Stage 3 data contracts and 8-category taxonomy
   scenario.md            benchmark answer key: every planted case and expected classification
+action.yml               GitHub Composite Action definition (Job Summary & artifact upload)
 pyproject.toml           PEP 621 package and CLI entry point configuration
 requirements.txt         runtime dependencies
 LICENSE                  MIT License

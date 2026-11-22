@@ -1,0 +1,207 @@
+name: "pytest-flaky-triage"
+description: "Three-stage pytest flaky-test detection, polluter inference, and static AST fault-side triage (Test Side vs Code Side)."
+branding:
+  icon: "activity"
+  color: "blue"
+
+inputs:
+  project:
+    description: "Root directory of the target pytest project to diagnose."
+    required: false
+    default: "."
+  target:
+    description: "Optional subdirectory, test file, or pytest node ID to restrict collection (--target)."
+    required: false
+    default: ""
+  k:
+    description: "Optional pytest -k keyword filter expression."
+    required: false
+    default: ""
+  intensive:
+    description: "Enable deep-dive preset (--intensive: 30 repeats, 15 hashseeds, 15 shuffles, 5 isolated-runs)."
+    required: false
+    default: "false"
+  isolated-scope:
+    description: "Isolation execution scope: 'smart' (only tests that failed/flipped) or 'all'."
+    required: false
+    default: "smart"
+  lang:
+    description: "Language for the generated report.md: 'en' or 'zh'."
+    required: false
+    default: "en"
+  out-dir:
+    description: "Output directory for results.csv, run_meta.csv, diagnosis.json, and report.md."
+    required: false
+    default: "./flaky-triage-out"
+  python-executable:
+    description: "Optional path to the Python interpreter with the target project's dependencies (--python)."
+    required: false
+    default: ""
+  fail-on-flaky:
+    description: "Fail the workflow step with a non-zero exit code when flaky tests are detected ('true' or 'false')."
+    required: false
+    default: "false"
+  upload-artifact:
+    description: "Automatically upload the output directory as a GitHub Actions artifact ('true' or 'false')."
+    required: false
+    default: "true"
+  artifact-name:
+    description: "Name of the uploaded GitHub Actions artifact."
+    required: false
+    default: "pytest-flaky-triage-report"
+
+outputs:
+  report-path:
+    description: "Path to the generated Markdown triage report (report.md)."
+    value: ${{ steps.triage.outputs.report-path }}
+  diagnosis-path:
+    description: "Path to the generated JSON diagnosis file (diagnosis.json)."
+    value: ${{ steps.triage.outputs.diagnosis-path }}
+  flaky-count:
+    description: "Total number of tests classified as flaky."
+    value: ${{ steps.triage.outputs.flaky-count }}
+  exit-code:
+    description: "Original exit code returned by pytest-flaky-triage."
+    value: ${{ steps.triage.outputs.exit-code }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install pytest-flaky-triage
+      shell: bash
+      run: |
+        PY_BIN="python3"
+        if ! command -v python3 >/dev/null 2>&1; then
+          PY_BIN="python"
+        fi
+        "$PY_BIN" -m pip install --quiet "$GITHUB_ACTION_PATH"
+
+    - name: Run flaky test triage and publish summary
+      id: triage
+      shell: bash
+      env:
+        INPUT_PROJECT: ${{ inputs.project }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_K: ${{ inputs.k }}
+        INPUT_INTENSIVE: ${{ inputs.intensive }}
+        INPUT_ISOLATED_SCOPE: ${{ inputs.isolated-scope }}
+        INPUT_LANG: ${{ inputs.lang }}
+        INPUT_OUT_DIR: ${{ inputs.out-dir }}
+        INPUT_PYTHON_EXECUTABLE: ${{ inputs.python-executable }}
+        INPUT_FAIL_ON_FLAKY: ${{ inputs.fail-on-flaky }}
+      run: |
+        PY_BIN="python3"
+        if ! command -v python3 >/dev/null 2>&1; then
+          PY_BIN="python"
+        fi
+
+        OUT_DIR="${INPUT_OUT_DIR:-./flaky-triage-out}"
+        REPORT_PATH="${OUT_DIR%/}/report.md"
+        DIAGNOSIS_PATH="${OUT_DIR%/}/diagnosis.json"
+
+        ARGS=(
+          "--project" "${INPUT_PROJECT:-.}"
+          "--out" "$OUT_DIR"
+          "--isolated-scope" "${INPUT_ISOLATED_SCOPE:-smart}"
+          "--lang" "${INPUT_LANG:-en}"
+        )
+
+        if [ -n "${INPUT_TARGET:-}" ]; then
+          ARGS+=("--target" "$INPUT_TARGET")
+        fi
+        if [ -n "${INPUT_K:-}" ]; then
+          ARGS+=("-k" "$INPUT_K")
+        fi
+        if [ "${INPUT_INTENSIVE:-false}" = "true" ]; then
+          ARGS+=("--intensive")
+        fi
+        if [ -n "${INPUT_PYTHON_EXECUTABLE:-}" ]; then
+          ARGS+=("--python" "$INPUT_PYTHON_EXECUTABLE")
+        fi
+
+        set +e
+        if command -v pytest-flaky-triage >/dev/null 2>&1; then
+          pytest-flaky-triage "${ARGS[@]}"
+        else
+          "$PY_BIN" -m flaky_triage.cli "${ARGS[@]}"
+        fi
+        EXIT_CODE=$?
+        set -e
+
+        if [ "$EXIT_CODE" -gt 1 ]; then
+          if [ -n "${GITHUB_OUTPUT:-}" ]; then
+            {
+              echo "report-path=$REPORT_PATH"
+              echo "diagnosis-path=$DIAGNOSIS_PATH"
+              echo "flaky-count=0"
+              echo "exit-code=$EXIT_CODE"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          exit "$EXIT_CODE"
+        fi
+
+        FLAKY_COUNT=$("$PY_BIN" - "$DIAGNOSIS_PATH" <<'PY'
+        import json
+        import pathlib
+        import sys
+
+        path = pathlib.Path(sys.argv[1])
+        if not path.is_file():
+            print(0)
+            raise SystemExit(0)
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        tests = data.get("tests", [])
+        if isinstance(tests, dict):
+            items = list(tests.values())
+        elif isinstance(tests, list):
+            items = tests
+        else:
+            items = []
+
+        if items:
+            count = sum(
+                1 for item in items if isinstance(item, dict) and item.get("verdict") == "flaky"
+            )
+        elif isinstance(data.get("summary"), dict):
+            count = int(data["summary"].get("flaky", 0))
+        else:
+            count = 0
+        print(count)
+        PY
+        )
+
+        if [ -n "${GITHUB_OUTPUT:-}" ]; then
+          {
+            echo "report-path=$REPORT_PATH"
+            echo "diagnosis-path=$DIAGNOSIS_PATH"
+            echo "flaky-count=$FLAKY_COUNT"
+            echo "exit-code=$EXIT_CODE"
+          } >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -f "$REPORT_PATH" ]; then
+          {
+            cat "$REPORT_PATH"
+            echo ""
+            echo "---"
+            echo "_Generated by [pytest-flaky-triage](https://github.com/Raintrrrreeeee/pytest-flaky-triage)_"
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "${INPUT_FAIL_ON_FLAKY:-false}" = "true" ]; then
+          if [ "${FLAKY_COUNT:-0}" -gt 0 ] || [ "$EXIT_CODE" -ne 0 ]; then
+            echo "::error::pytest-flaky-triage detected ${FLAKY_COUNT} flaky test(s) (exit code: ${EXIT_CODE})."
+            exit 1
+          fi
+        fi
+
+        exit 0
+
+    - name: Upload flaky triage report artifact
+      if: always() && inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.out-dir }}
+        if-no-files-found: warn

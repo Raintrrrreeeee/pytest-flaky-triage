@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pytest-flaky-triage"
-version = "2.4.0"
+version = "2.4.1"
 description = "Three-stage pytest flaky-test detection, statistical root-cause inference, and AST fault-side triage tool"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -20,6 +20,10 @@ keywords = [
     "ast",
     "root-cause-analysis",
     "triage",
+    "test-isolation",
+    "order-dependent",
+    "ci",
+    "github-actions",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -35,6 +39,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Quality Assurance",
     "Topic :: Software Development :: Testing",
 ]
