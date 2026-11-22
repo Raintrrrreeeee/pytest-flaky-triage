@@ -14,12 +14,13 @@ authors = [
 ]
 keywords = [
     "pytest",
+    "flaky",
     "flaky-tests",
-    "testing",
-    "static-analysis",
-    "ast",
-    "root-cause-analysis",
     "triage",
+    "testing",
+    "root-cause-analysis",
+    "ast",
+    "static-analysis",
     "test-isolation",
     "order-dependent",
     "ci",

@@ -189,6 +189,18 @@ pytest tests -p no:randomly -p no:cacheprovider --ignore=tests/fixtures
 
 You can integrate **`pytest-flaky-triage`** directly into your GitHub Actions workflow (`uses: Raintrrrreeeee/pytest-flaky-triage@v2`). When triggered (for example, automatically via `if: failure()` after a failed `pytest` step), the action runs the 3-stage diagnosis, appends `report.md` directly to the **GitHub Actions Job Summary (`$GITHUB_STEP_SUMMARY`)**, and uploads the diagnostic directory as a workflow artifact.
 
+#### Minimal One-Step Snippet
+
+Add this step right after your `pytest` step in `.github/workflows/ci.yml`:
+
+```yaml
+- name: Auto-triage flaky pytest failures
+  if: failure()
+  uses: Raintrrrreeeee/pytest-flaky-triage@v2
+```
+
+#### Full Workflow Example with Optional Inputs
+
 ```yaml
 # .github/workflows/ci.yml
 name: CI
@@ -214,12 +226,14 @@ jobs:
       - name: Run pytest suite
         run: pytest
 
-      - name: Run flaky test triage on failure
+      - name: Auto-triage flaky pytest failures
         if: failure()
         id: flaky_triage
         uses: Raintrrrreeeee/pytest-flaky-triage@v2
         with:
           project: "."
+          target: "tests/unit"
+          intensive: "false"
           isolated-scope: "smart"
           lang: "en"
           fail-on-flaky: "false"
