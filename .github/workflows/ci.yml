@@ -56,9 +56,11 @@ jobs:
           FLAKY_COUNT: ${{ steps.smoke.outputs.flaky-count }}
           REPORT_PATH: ${{ steps.smoke.outputs.report-path }}
           DIAGNOSIS_PATH: ${{ steps.smoke.outputs.diagnosis-path }}
+          EXIT_CODE: ${{ steps.smoke.outputs.exit-code }}
         run: |
           test -s ./out/ci_action_smoke/report.md
           test -s "$REPORT_PATH"
           test -s "$DIAGNOSIS_PATH"
-          test -s "$GITHUB_STEP_SUMMARY"
+          test -n "$GITHUB_STEP_SUMMARY"
           test "${FLAKY_COUNT:-0}" -gt 0
+          test "${EXIT_CODE:-1}" -eq 0
