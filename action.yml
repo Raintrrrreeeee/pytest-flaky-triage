@@ -74,7 +74,7 @@ runs:
         if ! command -v python3 >/dev/null 2>&1; then
           PY_BIN="python"
         fi
-        "$PY_BIN" -m pip install --quiet "$GITHUB_ACTION_PATH"
+        "$PY_BIN" -m pip install --quiet -e "$GITHUB_ACTION_PATH"
 
     - name: Run flaky test triage and publish summary
       id: triage
