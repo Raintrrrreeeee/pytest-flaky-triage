@@ -9,10 +9,14 @@ from pytest_flaky_triage_report.ast_utils import (
     ASYNC_CONCURRENCY_MODULES,
     ATTR_INIT_METHODS,
     CACHE_DECORATORS,
+    EAGER_STDLIB_SUBMODULES,
     FLOAT_SAFE_FUNCS,
+    KNOWN_LAZY_SUBMODULES,
     MATH_FLOAT_FUNCS,
     NET_MOCK_NAMES,
     NET_MOCK_TARGET_TOKENS,
+    NON_FLOAT_ATTRS,
+    NON_FLOAT_CALLS,
     ORDER_SENSITIVE_STR_METHODS,
     OS_FS_MUTATION_FUNCS,
     PATH_JOIN_RECEIVERS,
@@ -37,6 +41,7 @@ from pytest_flaky_triage_report.ast_utils import (
     UUID_FUNCTIONS,
     _call_head_name,
     _collect_local_imports,
+    _collect_submodule_imports,
     _dedup_preserve_order,
     _extract_assign_targets_and_value,
     _iter_class_hierarchy,
@@ -375,15 +380,107 @@ def _is_path_div(binop_node, local_exprs, imported=None):
     return False
 
 
+_CONTAINER_TYPE_NAMES = frozenset({
+    "list", "List", "dict", "Dict", "set", "Set", "frozenset", "FrozenSet",
+    "tuple", "Tuple", "Sequence", "Iterable", "Iterator", "Collection",
+    "Mapping", "MutableMapping", "MutableSequence", "MutableSet", "Callable",
+})
+
+_LOGGER_VAR_NAMES = frozenset({
+    "logger", "LOGGER", "_logger", "_LOGGER", "log", "LOG", "_log", "_LOG",
+})
+
+_LOGGER_INIT_CALLS = frozenset({
+    "logging.getLogger",
+    "getLogger",
+    "structlog.get_logger",
+    "get_logger",
+    "structlog.getLogger",
+    "loguru.logger",
+})
+
+_LOGGER_SAFE_METHODS = frozenset({
+    "debug",
+    "info",
+    "warning",
+    "warn",
+    "error",
+    "exception",
+    "critical",
+    "fatal",
+    "log",
+    "bind",
+    "opt",
+    "patch",
+    "contextualize",
+    "new",
+    "isEnabledFor",
+    "getEffectiveLevel",
+    "hasHandlers",
+    "getChild",
+})
+
+_FLOAT_STAT_METHODS = MATH_FLOAT_FUNCS | {
+    "mean", "avg", "average", "fmean", "std", "stdev", "pstdev", "var", "pvariance", "variance",
+}
+
+
 def _annotation_is_float(ann_node):
-    """Return True if a parameter/return/variable type annotation denotes `float`."""
+    """Return True if a parameter/return/variable type annotation denotes a scalar `float`."""
     if ann_node is None:
         return False
-    for sub in ast.walk(ann_node):
-        if isinstance(sub, ast.Name) and sub.id == "float":
-            return True
-        if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and "float" in sub.value:
-            return True
+    if isinstance(ann_node, ast.Name):
+        return ann_node.id == "float"
+    if isinstance(ann_node, ast.Constant) and isinstance(ann_node.value, str):
+        return ann_node.value.strip() in ("float", "Optional[float]", "float | None", "None | float")
+    if isinstance(ann_node, ast.Subscript):
+        head = (
+            ann_node.value.id
+            if isinstance(ann_node.value, ast.Name)
+            else (ann_node.value.attr if isinstance(ann_node.value, ast.Attribute) else None)
+        )
+        if head in _CONTAINER_TYPE_NAMES:
+            return False
+        if head in ("Optional", "Union", "Annotated"):
+            return _annotation_is_float(ann_node.slice)
+        return False
+    if isinstance(ann_node, ast.BinOp) and isinstance(ann_node.op, ast.BitOr):
+        parts = [ann_node.left, ann_node.right]
+        non_none = [
+            p
+            for p in parts
+            if not (isinstance(p, ast.Constant) and p.value is None)
+            and not (isinstance(p, ast.Name) and p.id == "None")
+        ]
+        return bool(non_none) and all(_annotation_is_float(p) for p in non_none)
+    if isinstance(ann_node, ast.Tuple):
+        non_none = [
+            p
+            for p in ann_node.elts
+            if not (isinstance(p, ast.Constant) and p.value is None)
+            and not (isinstance(p, ast.Name) and p.id == "None")
+        ]
+        return bool(non_none) and all(_annotation_is_float(p) for p in non_none)
+    return False
+
+
+def _is_direct_float_value_node(node):
+    """Return True if AST node is a direct float literal, signed float literal, or float arithmetic."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, float):
+        return True
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, (ast.UAdd, ast.USub))
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, float)
+    ):
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(
+        node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)
+    ):
+        return _is_direct_float_value_node(node.left) or _is_direct_float_value_node(node.right)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "float":
+        return True
     return False
 
 
@@ -414,10 +511,18 @@ def _extract_parametrize_float_vars(decorators):
 
         argvalues_node = dec.args[1]
         if len(param_names) == 1:
-            if any(
-                isinstance(sub, ast.Constant) and isinstance(sub.value, float)
-                for sub in ast.walk(argvalues_node)
-            ):
+            if isinstance(argvalues_node, (ast.List, ast.Tuple, ast.Set)):
+                if any(
+                    _is_direct_float_value_node(elt)
+                    or (
+                        isinstance(elt, (ast.Tuple, ast.List))
+                        and len(elt.elts) == 1
+                        and _is_direct_float_value_node(elt.elts[0])
+                    )
+                    for elt in argvalues_node.elts
+                ):
+                    float_vars.add(param_names[0])
+            elif _is_direct_float_value_node(argvalues_node):
                 float_vars.add(param_names[0])
         elif isinstance(argvalues_node, (ast.List, ast.Tuple, ast.Set)):
             for row in argvalues_node.elts:
@@ -428,10 +533,7 @@ def _extract_parametrize_float_vars(decorators):
                     row_elts = row.args
                 if row_elts is not None:
                     for idx, cell in enumerate(row_elts):
-                        if idx < len(param_names) and any(
-                            isinstance(sub, ast.Constant) and isinstance(sub.value, float)
-                            for sub in ast.walk(cell)
-                        ):
+                        if idx < len(param_names) and _is_direct_float_value_node(cell):
                             float_vars.add(param_names[idx])
     return float_vars
 
@@ -453,16 +555,10 @@ def _extract_func_float_vars(func_node, initial_float_vars=None, extra_decorator
         if defaults and pos_args:
             offset = len(pos_args) - len(defaults)
             for idx, d_node in enumerate(defaults):
-                if d_node is not None and any(
-                    isinstance(sub, ast.Constant) and isinstance(sub.value, float)
-                    for sub in ast.walk(d_node)
-                ):
+                if d_node is not None and _is_direct_float_value_node(d_node):
                     float_vars.add(pos_args[offset + idx].arg)
         for idx, d_node in enumerate(getattr(args_obj, "kw_defaults", [])):
-            if idx < len(kw_args) and d_node is not None and any(
-                isinstance(sub, ast.Constant) and isinstance(sub.value, float)
-                for sub in ast.walk(d_node)
-            ):
+            if idx < len(kw_args) and d_node is not None and _is_direct_float_value_node(d_node):
                 float_vars.add(kw_args[idx].arg)
 
     for node in ast.walk(func_node):
@@ -490,33 +586,151 @@ def _expr_has_float_safe_guard(expr, local_exprs, imported=None):
     return False
 
 
-def _expr_involves_float_calc(expr, local_exprs, float_vars=None, imported=None):
-    """Return True if expr or its local variable inputs involve float literals, float vars, arithmetic, sum(), or float math."""
-    fvars = float_vars or set()
-    for sub in _expand_expr_nodes(expr, local_exprs):
-        if isinstance(sub, ast.Constant) and isinstance(sub.value, float):
+def _is_non_float_expr(expr, local_exprs=None, imported=None, include_int_const=True, _seen=None):
+    """Return True if `expr` is a collection, metadata attribute, string, type, or integer-only expression."""
+    if expr is None:
+        return True
+    if isinstance(expr, ast.Constant):
+        if isinstance(expr.value, float):
+            return False
+        if isinstance(expr.value, int) and not isinstance(expr.value, bool):
+            return include_int_const
+        return True
+    if isinstance(
+        expr,
+        (
+            ast.List,
+            ast.Tuple,
+            ast.Set,
+            ast.Dict,
+            ast.ListComp,
+            ast.SetComp,
+            ast.DictComp,
+            ast.GeneratorExp,
+            ast.JoinedStr,
+        ),
+    ):
+        return True
+    if isinstance(expr, ast.Attribute):
+        if expr.attr in NON_FLOAT_ATTRS:
             return True
-        if isinstance(sub, ast.BinOp):
-            if isinstance(sub.op, ast.Div) and not _is_path_div(sub, local_exprs, imported=imported):
-                return True
-            if isinstance(sub.op, (ast.Add, ast.Sub, ast.Mult, ast.Pow, ast.Mod, ast.FloorDiv)):
-                for op_sub in _expand_expr_nodes(sub, local_exprs):
-                    if isinstance(op_sub, ast.Constant) and isinstance(op_sub.value, float):
-                        return True
-                    if isinstance(op_sub, ast.Name) and op_sub.id in fvars:
-                        return True
-        if isinstance(sub, ast.Call):
-            mod_or_obj, attr, bare_fn = _resolve_call_parts(sub.func, imported)
-            if bare_fn in ("sum", "float", "fsum") or (
-                bare_fn in (MATH_FLOAT_FUNCS | {"mean", "fmean", "stdev", "var"})
-                and mod_or_obj in ("math", "np", "numpy", "statistics")
-            ):
-                return True
-            if (
-                mod_or_obj in ("math", "np", "numpy", "statistics")
-                and attr in (MATH_FLOAT_FUNCS | {"mean", "fmean", "stdev", "var"})
-            ):
-                return True
+    if isinstance(expr, ast.Subscript):
+        if isinstance(expr.value, ast.Attribute) and expr.value.attr in NON_FLOAT_ATTRS:
+            return True
+        if isinstance(expr.value, ast.Name) and local_exprs and expr.value.id in local_exprs:
+            seen_next = set(_seen or ())
+            if expr.value.id not in seen_next:
+                seen_next.add(expr.value.id)
+                assigned = local_exprs[expr.value.id]
+                if isinstance(assigned, ast.Attribute) and assigned.attr in NON_FLOAT_ATTRS:
+                    return True
+    if isinstance(expr, ast.Call):
+        _, attr, bare_fn = _resolve_call_parts(expr.func, imported)
+        fn_name = bare_fn or attr
+        if not fn_name:
+            if isinstance(expr.func, ast.Name):
+                fn_name = expr.func.id
+            elif isinstance(expr.func, ast.Attribute):
+                fn_name = expr.func.attr
+        if fn_name in NON_FLOAT_CALLS:
+            return True
+    if isinstance(expr, ast.Name) and local_exprs and expr.id in local_exprs:
+        seen_next = set(_seen or ())
+        if expr.id not in seen_next:
+            seen_next.add(expr.id)
+            return _is_non_float_expr(
+                local_exprs[expr.id],
+                local_exprs=local_exprs,
+                imported=imported,
+                include_int_const=include_int_const,
+                _seen=seen_next,
+            )
+    return False
+
+
+def _expr_involves_float_calc(expr, local_exprs, float_vars=None, imported=None, _seen=None):
+    """Return True if expr or its local variable inputs involve float literals, float vars, division/power, float(), or float math/stats."""
+    if expr is None:
+        return False
+    if _is_non_float_expr(expr, local_exprs=local_exprs, imported=imported, include_int_const=True):
+        return False
+    fvars = float_vars or set()
+    seen = set(_seen or ())
+
+    if isinstance(expr, ast.Constant):
+        return isinstance(expr.value, float)
+
+    if isinstance(expr, ast.Name):
+        if expr.id in fvars:
+            return True
+        if local_exprs and expr.id in local_exprs and expr.id not in seen:
+            seen.add(expr.id)
+            return _expr_involves_float_calc(
+                local_exprs[expr.id], local_exprs, float_vars=fvars, imported=imported, _seen=seen
+            )
+        return False
+
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, (ast.UAdd, ast.USub)):
+        return _expr_involves_float_calc(
+            expr.operand, local_exprs, float_vars=fvars, imported=imported, _seen=seen
+        )
+
+    if isinstance(expr, ast.BinOp):
+        if isinstance(expr.op, ast.Div) and not _is_path_div(expr, local_exprs, imported=imported):
+            return True
+        if isinstance(expr.op, ast.Pow):
+            return True
+        if isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult, ast.Mod, ast.FloorDiv)):
+            return _expr_involves_float_calc(
+                expr.left, local_exprs, float_vars=fvars, imported=imported, _seen=seen
+            ) or _expr_involves_float_calc(
+                expr.right, local_exprs, float_vars=fvars, imported=imported, _seen=seen
+            )
+        return False
+
+    if isinstance(expr, ast.IfExp):
+        return _expr_involves_float_calc(
+            expr.body, local_exprs, float_vars=fvars, imported=imported, _seen=seen
+        ) or _expr_involves_float_calc(
+            expr.orelse, local_exprs, float_vars=fvars, imported=imported, _seen=seen
+        )
+
+    if isinstance(expr, ast.Call):
+        mod_or_obj, attr, bare_fn = _resolve_call_parts(expr.func, imported)
+        if bare_fn in ("sum", "float", "fsum"):
+            return True
+        if bare_fn in _FLOAT_STAT_METHODS and mod_or_obj in (None, "math", "np", "numpy", "statistics"):
+            return True
+        if mod_or_obj in ("math", "np", "numpy", "statistics") and attr in _FLOAT_STAT_METHODS:
+            return True
+        if (
+            isinstance(expr.func, ast.Attribute)
+            and expr.func.attr in ("mean", "avg", "average", "std", "var", "sqrt", "cos", "sin", "exp")
+            and mod_or_obj not in _LOGGER_VAR_NAMES
+        ):
+            return True
+        return False
+
+    if isinstance(expr, ast.Compare):
+        operands = [expr.left, *expr.comparators]
+        for idx, op in enumerate(expr.ops):
+            if isinstance(op, (ast.Eq, ast.NotEq)):
+                left_op = operands[idx]
+                right_op = operands[idx + 1]
+                if _is_non_float_expr(
+                    left_op, local_exprs=local_exprs, imported=imported, include_int_const=False
+                ) or _is_non_float_expr(
+                    right_op, local_exprs=local_exprs, imported=imported, include_int_const=False
+                ):
+                    continue
+                if _expr_involves_float_calc(
+                    left_op, local_exprs, float_vars=fvars, imported=imported, _seen=seen
+                ) or _expr_involves_float_calc(
+                    right_op, local_exprs, float_vars=fvars, imported=imported, _seen=seen
+                ):
+                    return True
+        return False
+
     return False
 
 
@@ -1048,6 +1262,112 @@ def _coalesce_function_signals(
         })
 
 
+def _scan_implicit_submodule_imports(
+    func_node,
+    file_rel,
+    top_pkg_aliases=None,
+    explicit_submodules=None,
+    project_submodules=None,
+    imported=None,
+):
+    """Detect calls to `<alias>.<submodule>.<attr>(...)` in a Test Side function where `<pkg>.<submodule>` was not imported."""
+    eff_top_aliases = dict(top_pkg_aliases or {})
+    eff_explicit_subs = set(explicit_submodules or ())
+    if not eff_top_aliases and imported:
+        for local_k, entry in imported.items():
+            if isinstance(entry, tuple) and len(entry) == 3:
+                _, target, mod_name = entry
+                if mod_name and "." not in mod_name and target == mod_name:
+                    eff_top_aliases[local_k] = mod_name
+                elif mod_name and "." in mod_name:
+                    parts = [p for p in mod_name.split(".") if p]
+                    if len(parts) >= 2:
+                        eff_explicit_subs.add(f"{parts[0]}.{parts[1]}")
+
+    func_top_aliases, func_explicit_subs = _collect_submodule_imports(func_node)
+    eff_top_aliases.update(func_top_aliases)
+    eff_explicit_subs.update(func_explicit_subs)
+    if not eff_top_aliases:
+        return []
+
+    local_names = set()
+    args_obj = getattr(func_node, "args", None)
+    if args_obj is not None:
+        for arg in (
+            list(getattr(args_obj, "posonlyargs", []))
+            + list(getattr(args_obj, "args", []))
+            + list(getattr(args_obj, "kwonlyargs", []))
+        ):
+            local_names.add(arg.arg)
+        for special_arg in (getattr(args_obj, "vararg", None), getattr(args_obj, "kwarg", None)):
+            if special_arg is not None:
+                local_names.add(special_arg.arg)
+    for node in ast.walk(func_node):
+        targets, val = _extract_assign_targets_and_value(node)
+        if targets and val is not None:
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    local_names.add(target.id)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            for sub_t in ast.walk(node.target):
+                if isinstance(sub_t, ast.Name) and isinstance(sub_t.ctx, ast.Store):
+                    local_names.add(sub_t.id)
+
+    proj_subs = set(project_submodules or ())
+    raw_hits = []
+    for node in ast.walk(func_node):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        parts = []
+        cur = node.func
+        while isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        if not isinstance(cur, ast.Name) or len(parts) < 2:
+            continue
+        alias = cur.id
+        if alias in local_names or alias not in eff_top_aliases:
+            continue
+        parts.reverse()
+        submodule = parts[0]
+        attr_rest = ".".join(parts[1:])
+        pkg = eff_top_aliases[alias]
+        full_sub = f"{pkg}.{submodule}"
+        if full_sub in eff_explicit_subs:
+            continue
+        if (pkg, submodule) in EAGER_STDLIB_SUBMODULES:
+            continue
+        if (pkg, submodule) in KNOWN_LAZY_SUBMODULES or full_sub in proj_subs:
+            call_chain = f"{alias}.{submodule}.{attr_rest}"
+            raw_hits.append((node.lineno, call_chain, full_sub))
+
+    if not raw_hits:
+        return []
+
+    raw_hits.sort(key=lambda item: item[0])
+    grouped = {}
+    order_keys = []
+    for lineno, call_chain, full_sub in raw_hits:
+        key = (call_chain, full_sub)
+        if key not in grouped:
+            grouped[key] = []
+            order_keys.append(key)
+        grouped[key].append(lineno)
+
+    results = []
+    for call_chain, full_sub in order_keys:
+        lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order(grouped[(call_chain, full_sub)]))
+        results.append({
+            "side": "Test Side",
+            "location": f"{file_rel}:{lines_str}",
+            "detail": (
+                f"calls `{call_chain}` without importing `{full_sub}` in this test file "
+                f"(implicitly relies on another test file importing it first)"
+            ),
+        })
+    return results
+
+
 def _scan_function_signals(
     func_node,
     file_rel,
@@ -1059,6 +1379,9 @@ def _scan_function_signals(
     initial_hardcoded_vars=None,
     initial_float_vars=None,
     extra_decorators=None,
+    top_pkg_aliases=None,
+    explicit_submodules=None,
+    project_submodules=None,
 ):
     """Scan a function/method AST and coalesce static indicators per function.
 
@@ -1115,6 +1438,17 @@ def _scan_function_signals(
     signals["shared_state_interference"].extend(
         _scan_cache_decorators(func_node, file_rel, side, eff_imported)
     )
+    if side == "Test Side":
+        signals["shared_state_interference"].extend(
+            _scan_implicit_submodule_imports(
+                func_node,
+                file_rel,
+                top_pkg_aliases=top_pkg_aliases,
+                explicit_submodules=explicit_submodules,
+                project_submodules=project_submodules,
+                imported=eff_imported,
+            )
+        )
     (
         joined_worker_vars,
         spawns_in_loops,
@@ -1206,7 +1540,14 @@ def _scan_function_signals(
                 and len(node.args) >= 2
                 and not _expr_has_float_safe_guard(node, local_exprs, imported=eff_imported)
             ):
-                if any(
+                if not (
+                    _is_non_float_expr(
+                        node.args[0], local_exprs=local_exprs, imported=eff_imported, include_int_const=False
+                    )
+                    or _is_non_float_expr(
+                        node.args[1], local_exprs=local_exprs, imported=eff_imported, include_int_const=False
+                    )
+                ) and any(
                     _expr_involves_float_calc(
                         a, local_exprs, float_vars=float_vars, imported=eff_imported
                     )
@@ -1356,6 +1697,10 @@ _READONLY_MODULE_GLOBALS = frozenset({
     "log",
     "LOGGER",
     "LOG",
+    "_logger",
+    "_LOGGER",
+    "_log",
+    "_LOG",
     "__all__",
     "__path__",
     "__spec__",
@@ -1368,6 +1713,10 @@ _READONLY_GLOBAL_CALLS = frozenset({
     "compile",
     "logging.getLogger",
     "getLogger",
+    "structlog.get_logger",
+    "get_logger",
+    "structlog.getLogger",
+    "loguru.logger",
     "Path",
     "pathlib.Path",
     "PurePath",
@@ -1440,6 +1789,17 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
                 continue
             var_name = node.value.id
             if var_name in module_globals and var_name not in local_assigned_names:
+                _, call_head = module_globals[var_name]
+                is_logger_var = (var_name in _LOGGER_VAR_NAMES) or (
+                    (call_head or "") in _LOGGER_INIT_CALLS
+                )
+                if (
+                    is_logger_var
+                    and isinstance(node, ast.Attribute)
+                    and isinstance(node.ctx, ast.Load)
+                    and node.attr in _LOGGER_SAFE_METHODS
+                ):
+                    continue
                 shared_hits.append((node.lineno, var_name))
         elif isinstance(node, ast.Global):
             for var_name in node.names:

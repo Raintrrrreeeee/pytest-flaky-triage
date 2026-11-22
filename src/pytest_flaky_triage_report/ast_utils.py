@@ -76,6 +76,101 @@ MATH_FLOAT_FUNCS = {
     "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
     "exp", "log", "log10", "log2", "pow", "fsum", "hypot", "radians", "degrees",
 }
+NON_FLOAT_ATTRS = frozenset({
+    "columns", "types", "dtypes", "shape", "ndim", "schema",
+    "names", "fields", "children", "id", "name", "dtype", "index",
+})
+NON_FLOAT_CALLS = frozenset({
+    "len", "set", "frozenset", "list", "tuple", "dict", "str", "int",
+    "bool", "bytes", "type", "isinstance", "issubclass", "range",
+    "enumerate", "zip", "sorted", "reversed", "keys", "values", "items",
+    "split", "splitlines", "strip", "lstrip", "rstrip", "lower", "upper",
+    "replace", "format", "encode", "decode", "count", "index", "find",
+    "startswith", "endswith",
+})
+KNOWN_LAZY_SUBMODULES = frozenset({
+    ("polars", "testing"),
+    ("polars", "selectors"),
+    ("pandas", "testing"),
+    ("numpy", "testing"),
+    ("numpy", "typing"),
+    ("scipy", "stats"),
+    ("scipy", "spatial"),
+    ("scipy", "optimize"),
+    ("scipy", "integrate"),
+    ("scipy", "interpolate"),
+    ("scipy", "linalg"),
+    ("scipy", "fft"),
+    ("scipy", "signal"),
+    ("scipy", "sparse"),
+    ("scipy", "special"),
+    ("scipy", "ndimage"),
+    ("scipy", "cluster"),
+    ("scipy", "io"),
+    ("scipy", "constants"),
+    ("matplotlib", "pyplot"),
+    ("matplotlib", "patches"),
+    ("matplotlib", "colors"),
+    ("matplotlib", "ticker"),
+    ("matplotlib", "dates"),
+    ("matplotlib", "gridspec"),
+    ("matplotlib", "animation"),
+    ("matplotlib", "figure"),
+    ("matplotlib", "style"),
+    ("sklearn", "metrics"),
+    ("sklearn", "model_selection"),
+    ("sklearn", "preprocessing"),
+    ("sklearn", "pipeline"),
+    ("sklearn", "ensemble"),
+    ("sklearn", "linear_model"),
+    ("sklearn", "cluster"),
+    ("sklearn", "decomposition"),
+    ("sklearn", "datasets"),
+    ("urllib", "request"),
+    ("urllib", "parse"),
+    ("urllib", "error"),
+    ("urllib", "robotparser"),
+    ("importlib", "metadata"),
+    ("importlib", "resources"),
+    ("importlib", "util"),
+    ("importlib", "abc"),
+    ("importlib", "machinery"),
+    ("http", "client"),
+    ("http", "server"),
+    ("http", "cookies"),
+    ("http", "cookiejar"),
+    ("xml", "etree"),
+    ("xml", "dom"),
+    ("xml", "sax"),
+    ("email", "message"),
+    ("email", "parser"),
+    ("email", "mime"),
+    ("email", "utils"),
+    ("unittest", "mock"),
+    ("concurrent", "futures"),
+    ("logging", "handlers"),
+    ("logging", "config"),
+    ("ctypes", "util"),
+    ("ctypes", "wintypes"),
+    ("multiprocessing", "pool"),
+    ("multiprocessing", "managers"),
+    ("multiprocessing", "shared_memory"),
+    ("pyarrow", "parquet"),
+    ("pyarrow", "dataset"),
+    ("pyarrow", "compute"),
+    ("pyarrow", "feather"),
+    ("pyarrow", "csv"),
+    ("torch", "testing"),
+})
+EAGER_STDLIB_SUBMODULES = frozenset({
+    ("os", "path"),
+    ("sys", "modules"),
+    ("datetime", "datetime"),
+    ("datetime", "date"),
+    ("datetime", "time"),
+    ("datetime", "timedelta"),
+    ("datetime", "timezone"),
+})
 
 
 @lru_cache(maxsize=512)
@@ -215,13 +310,124 @@ def _collect_imports_and_globals(tree, project_dir, current_file=None):
         else:
             targets, val = _extract_assign_targets_and_value(node)
             if targets and val is not None:
-                call_name = _call_head_name(val)
+                call_name = _call_head_name(val, imported=imported)
+                if (
+                    call_name is None
+                    and isinstance(val, ast.Attribute)
+                    and isinstance(val.value, ast.Name)
+                ):
+                    root_obj = _resolve_root_name(val.value.id, imported)
+                    call_name = f"{root_obj}.{val.attr}"
                 for target in targets:
                     if isinstance(target, ast.Name):
                         if isinstance(val, (ast.Constant, ast.Tuple)) and target.id not in mutated_via_global:
                             continue
                         globals_map[target.id] = (node.lineno, call_name)
     return imported, globals_map
+
+
+def _collect_submodule_imports(tree_or_node):
+    """Return (top_pkg_aliases, explicit_submodules) from AST Import/ImportFrom nodes.
+
+    top_pkg_aliases maps local_alias -> top_package_name for `import pkg [as alias]`.
+    explicit_submodules is a set of 'pkg.submodule' strings explicitly imported.
+    """
+    top_pkg_aliases = {}
+    explicit_submodules = set()
+    if tree_or_node is None:
+        return top_pkg_aliases, explicit_submodules
+    for node in ast.walk(tree_or_node):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = [p for p in alias.name.split(".") if p]
+                if not parts:
+                    continue
+                if len(parts) == 1:
+                    local = alias.asname or parts[0]
+                    top_pkg_aliases[local] = parts[0]
+                else:
+                    explicit_submodules.add(f"{parts[0]}.{parts[1]}")
+                    if not alias.asname:
+                        top_pkg_aliases.setdefault(parts[0], parts[0])
+        elif isinstance(node, ast.ImportFrom):
+            if getattr(node, "level", 0):
+                continue
+            mod_name = node.module or ""
+            parts = [p for p in mod_name.split(".") if p]
+            if not parts:
+                continue
+            if len(parts) >= 2:
+                explicit_submodules.add(f"{parts[0]}.{parts[1]}")
+            elif len(parts) == 1:
+                for alias in node.names:
+                    if alias.name and alias.name != "*":
+                        explicit_submodules.add(f"{parts[0]}.{alias.name}")
+    return top_pkg_aliases, explicit_submodules
+
+
+_IGNORED_SCAN_DIRS = frozenset({
+    ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+    "node_modules", "build", "dist", "out",
+})
+
+
+def _collect_project_explicit_submodules(project_dir, exclude_file=None):
+    """Collect 'pkg.submodule' strings explicitly imported across other Python files in `project_dir`."""
+    if not project_dir:
+        return set()
+    project_path = Path(project_dir)
+    if not project_path.is_dir():
+        return set()
+    exclude_resolved = None
+    if exclude_file is not None:
+        try:
+            exclude_resolved = Path(exclude_file).resolve()
+        except OSError:
+            exclude_resolved = None
+
+    found = set()
+    stack = [project_path]
+    while stack:
+        cur_dir = stack.pop()
+        try:
+            entries = list(cur_dir.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            if name.startswith(".") and name != ".":
+                continue
+            try:
+                if entry.is_dir():
+                    if name not in _IGNORED_SCAN_DIRS and not name.endswith(".egg-info"):
+                        stack.append(entry)
+                elif entry.is_file() and name.endswith(".py"):
+                    if exclude_resolved is not None and entry.resolve() == exclude_resolved:
+                        continue
+                    tree = _parse_file(entry)
+                    if tree is None:
+                        continue
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            for alias in node.names:
+                                parts = [p for p in alias.name.split(".") if p]
+                                if len(parts) >= 2:
+                                    found.add(f"{parts[0]}.{parts[1]}")
+                        elif isinstance(node, ast.ImportFrom) and not getattr(node, "level", 0):
+                            parts = [p for p in (node.module or "").split(".") if p]
+                            if len(parts) >= 2:
+                                found.add(f"{parts[0]}.{parts[1]}")
+                            elif len(parts) == 1:
+                                for alias in node.names:
+                                    if alias.name and alias.name != "*":
+                                        if (parts[0], alias.name) in KNOWN_LAZY_SUBMODULES or _resolve_module_file(
+                                            project_path, f"{parts[0]}.{alias.name}"
+                                        ) is not None:
+                                            found.add(f"{parts[0]}.{alias.name}")
+            except OSError:
+                continue
+    return found
 
 
 def _call_head_name(node, imported=None):

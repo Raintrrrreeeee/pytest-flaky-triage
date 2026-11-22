@@ -662,6 +662,74 @@ def test_task8_default_isolated_runs_is_two(tmp_path):
         assert len(iso_rows) == 2
 
 
+def test_venv_bin_dir_prepended_to_subprocess_path_both_engines(tmp_path):
+    """Task 4: When target project has .venv/bin/python, .venv/bin is prepended to subprocess PATH
+    so tests invoking project CLI entrypoints via subprocess.run(['<cli>', ...]) succeed out-of-the-box."""
+    import csv
+    import stat
+    from flaky_triage import runner
+
+    proj = tmp_path / "cli_venv_proj"
+    venv_bin = proj / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (proj / "tests").mkdir(parents=True)
+
+    py_link = venv_bin / "python"
+    try:
+        py_link.symlink_to(sys.executable)
+    except OSError:
+        import shutil
+        shutil.copy2(sys.executable, py_link)
+
+    # Unit check on _prepend_python_bin_to_path preserving .venv/bin without resolving symlink
+    patched_path = runner._prepend_python_bin_to_path(str(py_link), "/usr/bin:/bin")
+    assert patched_path.split(os.pathsep)[0] == os.path.abspath(str(venv_bin))
+
+    if os.name != "nt":
+        cli_script = venv_bin / "lens_test_cli"
+        cli_script.write_text("#!/bin/sh\necho 'lens-cli-ready'\n", encoding="utf-8")
+        cli_script.chmod(cli_script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+        (proj / "tests" / "test_cli_call.py").write_text(
+            "import subprocess\n\n"
+            "def test_cli_entrypoint_in_path():\n"
+            "    res = subprocess.run(['lens_test_cli', '--help'], capture_output=True, text=True, check=False)\n"
+            "    assert res.returncode == 0\n"
+            "    assert 'lens-cli-ready' in res.stdout\n",
+            encoding="utf-8",
+        )
+
+        for engine in ("python", "bash"):
+            out_dir = tmp_path / f"venv_path_out_{engine}"
+            args = [
+                "--project", str(proj),
+                "--out", str(out_dir),
+                "--repeats", "1",
+                "--hash-seeds", "",
+                "--orders", "0",
+                "--timezones", "",
+                "--isolated", "0",
+                "--no-report",
+            ]
+            if engine == "python":
+                env_py = {**os.environ, "FLAKY_PURE_PYTHON": "1", "PYTHONPATH": str(ROOT / "src")}
+                res = subprocess.run(
+                    [sys.executable, "-m", "flaky_triage.cli", *args],
+                    env=env_py,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            else:
+                res = subprocess.run(["bash", str(DETECT), *args], capture_output=True, text=True, timeout=120)
+            assert res.returncode == 0, f"{engine}: {res.stderr}"
+            with (out_dir / "results.csv").open(encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            assert len(rows) == 1
+            assert rows[0]["outcome"] == "passed", f"{engine} failed CLI subprocess test: {rows}"
+
+
+
 
 
 

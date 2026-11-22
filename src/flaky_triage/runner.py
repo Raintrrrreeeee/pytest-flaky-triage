@@ -394,6 +394,25 @@ def _find_target_python(explicit_python, project_dir, tool_python):
     return str(tool_python)
 
 
+def _prepend_python_bin_to_path(target_python, base_path=None):
+    """Prepend the directory containing `target_python` to `PATH` without resolving binary symlinks."""
+    current_path = os.environ.get("PATH", "") if base_path is None else base_path
+    if not target_python:
+        return current_path
+    py_path = Path(target_python).expanduser()
+    if not py_path.is_file():
+        resolved = shutil.which(str(target_python))
+        if resolved:
+            py_path = Path(resolved)
+    if py_path.is_file() or py_path.parent != Path("."):
+        bin_dir = os.path.abspath(str(py_path.parent))
+        path_parts = [p for p in current_path.split(os.pathsep) if p]
+        if not path_parts or path_parts[0] != bin_dir:
+            deduped = [bin_dir, *[p for p in path_parts if p != bin_dir]]
+            return os.pathsep.join(deduped)
+    return current_path
+
+
 def _check_pytest_available(python_bin):
     p = Path(python_bin)
     if not (p.is_file() or shutil.which(python_bin)):
@@ -700,6 +719,7 @@ def run_detect(argv=None):
             E_ENV,
         )
 
+    target_env_path = _prepend_python_bin_to_path(target_python)
     py_path_parts = [str(lib_dir)]
     if (project_dir / "src").is_dir():
         py_path_parts.append(str(project_dir / "src"))
@@ -781,6 +801,7 @@ def run_detect(argv=None):
     c_env.pop("PYTEST_ADDOPTS", None)
     c_env.pop("FLAKY_ORDER_FILE", None)
     c_env.pop("FLAKY_EVENTS_FILE", None)
+    c_env["PATH"] = target_env_path
     c_env["PYTHONHASHSEED"] = "0"
     c_env["TZ"] = "UTC"
     c_env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -900,6 +921,7 @@ def run_detect(argv=None):
                 r_env = os.environ.copy()
                 r_env.pop("PYTEST_ADDOPTS", None)
                 r_env.pop("FLAKY_COLLECT_FILE", None)
+                r_env["PATH"] = target_env_path
                 r_env["PYTHONHASHSEED"] = str(hash_seed)
                 r_env["TZ"] = str(value) if condition == "tz" else "UTC"
                 r_env["PYTHONDONTWRITEBYTECODE"] = "1"

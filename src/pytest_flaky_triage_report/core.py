@@ -671,6 +671,12 @@ def _translate_hint_zh(hint):
         " without explicit timezone (`tz`) or time freeze",
         " 且未显式指定时区（`tz`）或固定时间",
     )
+    text = re.sub(
+        r"calls ([`'][^`']+[`']) without importing ([`'][^`']+[`']) in this test file "
+        r"\(implicitly relies on another test file importing it first\)",
+        r"调用了 \1 但当前测试文件未显式导入 \2（隐式依赖其他测试文件的导入副作用，单测隔离运行时会触发 AttributeError）",
+        text,
+    )
     text = text.replace("calls ", "调用了 ")
     text = text.replace("uses unsynchronized concurrency/timing primitives", "使用了未同步的并发/计时原语")
     text = text.replace("uses timing sleep", "使用了固定时长等待")

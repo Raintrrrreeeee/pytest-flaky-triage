@@ -368,6 +368,19 @@ fi
 "$TARGET_PYTHON" -m pytest --version >/dev/null 2>&1 \
     || die "pytest is not installed for $TARGET_PYTHON; run: pip install -r requirements.txt" "$E_ENV"
 
+TARGET_PYTHON_BIN_DIR=""
+if [[ $TARGET_PYTHON == */* ]]; then
+    TARGET_PYTHON_BIN_DIR=$(cd -P "$(dirname "$TARGET_PYTHON")" 2>/dev/null && pwd -P || dirname "$TARGET_PYTHON")
+elif command -v "$TARGET_PYTHON" >/dev/null 2>&1; then
+    TARGET_PYTHON_BIN_DIR=$(dirname "$(command -v "$TARGET_PYTHON")")
+fi
+if [[ -n $TARGET_PYTHON_BIN_DIR && -d $TARGET_PYTHON_BIN_DIR ]]; then
+    case ":${PATH:-}:" in
+        ":$TARGET_PYTHON_BIN_DIR:"*) ;;
+        *) export PATH="$TARGET_PYTHON_BIN_DIR${PATH:+:$PATH}" ;;
+    esac
+fi
+
 TARGET_PYTHONPATH="$LIB_DIR"
 if [[ -d $PROJECT/src ]]; then
     TARGET_PYTHONPATH="$TARGET_PYTHONPATH:$PROJECT/src"

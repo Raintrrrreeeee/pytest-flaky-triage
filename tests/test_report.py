@@ -2331,6 +2331,190 @@ def test_ast_direct_global_read_and_polluter_scanning(tmp_path):
     assert report_data["diagnosis"]["tests"][1]["resolution"]["fault_side"] == "Test Side"
 
 
+def test_logger_calls_exempted_from_shared_state_unless_mutating(tmp_path):
+    """Task 1: Standard logger output calls (debug/info/warning/error/etc.) are exempted from
+    shared_state_interference, whereas logger state mutations (setLevel/addHandler/disabled=...) are flagged."""
+    src_dir = tmp_path / "src" / "data_pipeline"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "silver.py").write_text(
+        "import logging\n"
+        "import structlog\n"
+        "import loguru\n\n"
+        "logger = logging.getLogger(__name__)\n"
+        "_logger = structlog.get_logger()\n"
+        "LOG = loguru.logger\n\n"
+        "def convert_to_silver(x):\n"
+        "    logger.debug('start %s', x)\n"
+        "    logger.info('processing')\n"
+        "    logger.warning('warn msg')\n"
+        "    _logger.error('err msg')\n"
+        "    LOG.critical('crit msg')\n"
+        "    return x\n\n"
+        "def mutate_logger_level():\n"
+        "    logger.setLevel(logging.DEBUG)\n\n"
+        "def mutate_logger_disabled():\n"
+        "    logger.disabled = True\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_silver_log.py").write_text(
+        "from data_pipeline.silver import convert_to_silver, mutate_logger_level, mutate_logger_disabled\n\n"
+        "def test_clean_logger_usage():\n"
+        "    assert convert_to_silver(42) == 42\n\n"
+        "def test_mutates_logger_setlevel():\n"
+        "    mutate_logger_level()\n\n"
+        "def test_mutates_logger_disabled_attr():\n"
+        "    mutate_logger_disabled()\n",
+        encoding="utf-8",
+    )
+
+    info_clean = inspect_test_source(
+        "tests/test_silver_log.py::test_clean_logger_usage", project_dir=tmp_path
+    )
+    assert info_clean["indicators"]["shared_state_interference"] == []
+
+    info_setlevel = inspect_test_source(
+        "tests/test_silver_log.py::test_mutates_logger_setlevel", project_dir=tmp_path
+    )
+    assert any(
+        "logger" in h["detail"] and h["side"] == "Code Side"
+        for h in info_setlevel["indicators"]["shared_state_interference"]
+    )
+
+    info_disabled = inspect_test_source(
+        "tests/test_silver_log.py::test_mutates_logger_disabled_attr", project_dir=tmp_path
+    )
+    assert any(
+        "logger" in h["detail"] and h["side"] == "Code Side"
+        for h in info_disabled["indicators"]["shared_state_interference"]
+    )
+
+
+def test_float_precision_tightened_against_metadata_and_collection_comparisons(tmp_path):
+    """Task 2: Metadata/collection/integer equality assertions (.columns, .types, .shape[0], set(), len(), etc.)
+    do not trigger float_precision even when local dicts contain float probabilities."""
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_tight_float.py").write_text(
+        "import math\n\n"
+        "def test_metadata_and_collection_asserts(rel, expected_columns, expected_types, fields):\n"
+        "    attribute_dict = {'ATTR2': ([0.1, 0.6, 0.2, 0.1], 'cat')}\n"
+        "    attribute_cols = list(attribute_dict.keys())\n"
+        "    result = make_event_table(rel, attribute_cols)\n"
+        "    col_types = [t.id for t in result.types]\n"
+        "    rows_with_null_relations = result.filter('RELATION IS NULL')\n"
+        "    assert result.columns == expected_columns\n"
+        "    assert col_types == expected_types\n"
+        "    assert set(fields) == set(attribute_cols)\n"
+        "    assert rows_with_null_relations.shape[0] == rel.shape[0]\n"
+        "    assert len(attribute_cols) == 1\n"
+        "    assert int(rel.shape[0]) == 10\n"
+        "    assert str(result.name) == 'events'\n"
+        "    assert type(attribute_cols) == list\n\n"
+        "def test_real_float_div_and_pow_and_math(x, y):\n"
+        "    ratio = x / y\n"
+        "    assert ratio == 1\n"
+        "    assert (x ** 0.5) == y\n"
+        "    assert math.cos(x) == 0\n",
+        encoding="utf-8",
+    )
+
+    info_meta = inspect_test_source(
+        "tests/test_tight_float.py::test_metadata_and_collection_asserts", project_dir=tmp_path
+    )
+    assert info_meta["indicators"]["float_precision"] == []
+
+    info_real = inspect_test_source(
+        "tests/test_tight_float.py::test_real_float_div_and_pow_and_math", project_dir=tmp_path
+    )
+    assert len(info_real["indicators"]["float_precision"]) == 1
+    assert info_real["indicators"]["float_precision"][0]["location"] == "tests/test_tight_float.py:20, 21, 22"
+
+
+def test_implicit_submodule_import_detected_as_test_side_shared_state(tmp_path):
+    """Task 3: Calling `<alias>.<submodule>.<func>(...)` without importing `<pkg>.<submodule>` in the current
+    test file produces a Test Side shared_state_interference signal in both English and Chinese reports."""
+    import copy
+    from pytest_flaky_triage_report.core import render_markdown
+
+    src_dir = tmp_path / "src" / "data_pipeline"
+    src_dir.mkdir(parents=True)
+    (src_dir / "__init__.py").write_text("", encoding="utf-8")
+    (src_dir / "silver.py").write_text(
+        "import logging\n\n"
+        "logger = logging.getLogger(__name__)\n\n"
+        "def make_event_table(rel):\n"
+        "    logger.info('making table')\n"
+        "    return rel\n",
+        encoding="utf-8",
+    )
+
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    (tests_dir / "test_bronze.py").write_text(
+        "import polars as pl\n"
+        "import polars.testing\n\n"
+        "def test_bronze_Explicit(df1, df2):\n"
+        "    pl.testing.assert_frame_equal(df1, df2)\n",
+        encoding="utf-8",
+    )
+    (tests_dir / "test_silver.py").write_text(
+        "import polars as pl\n"
+        "from data_pipeline.silver import make_event_table\n\n"
+        "def test_make_event_table_implicit(df1, df2):\n"
+        "    res = make_event_table(df1)\n"
+        "    assert res.columns == df2.columns\n"
+        "    pl.testing.assert_frame_equal(res, df2)\n",
+        encoding="utf-8",
+    )
+
+    info_bronze = inspect_test_source(
+        "tests/test_bronze.py::test_bronze_Explicit", project_dir=tmp_path
+    )
+    assert info_bronze["indicators"]["shared_state_interference"] == []
+
+    info_silver = inspect_test_source(
+        "tests/test_silver.py::test_make_event_table_implicit", project_dir=tmp_path
+    )
+    assert info_silver["indicators"]["float_precision"] == []
+    shared_hits = info_silver["indicators"]["shared_state_interference"]
+    assert len(shared_hits) == 1
+    assert shared_hits[0]["side"] == "Test Side"
+    assert shared_hits[0]["location"] == "tests/test_silver.py:7"
+    assert (
+        shared_hits[0]["detail"]
+        == "calls `pl.testing.assert_frame_equal` without importing `polars.testing` in this test file "
+        "(implicitly relies on another test file importing it first)"
+    )
+
+    shared_cause = [
+        {
+            "candidates": ["shared_state_interference"],
+            "status": "suspected",
+            "reason": "Outcomes differ across test orders, or isolated executions differ from suite executions, with a consistent repeat baseline.",
+            "run_ids": [1, 2],
+        }
+    ]
+    res = disambiguate_causes(copy.deepcopy(shared_cause), info_silver)
+    assert res["fault_side"] == "Test Side"
+    assert res["basis"] == "Runtime+AST"
+    assert res["conflicting_hints"] == []
+
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/test_silver.py::test_make_event_table_implicit"
+    diag["tests"][1]["suspected_causes"] = copy.deepcopy(shared_cause)
+    md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
+    assert "测试侧 (Test Side)" in md_zh
+    assert (
+        "调用了 `pl.testing.assert_frame_equal` 但当前测试文件未显式导入 `polars.testing`"
+        "（隐式依赖其他测试文件的导入副作用，单测隔离运行时会触发 AttributeError）"
+    ) in md_zh
+
+
+
 
 
 

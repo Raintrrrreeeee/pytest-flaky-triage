@@ -11,6 +11,8 @@ from pytest_flaky_triage_report.ast_utils import (
     _call_head_name,
     _collect_imports_and_globals,
     _collect_local_imports,
+    _collect_project_explicit_submodules,
+    _collect_submodule_imports,
     _dedup_preserve_order,
     _extract_assign_targets_and_value,
     _find_enclosing_class,
@@ -35,6 +37,7 @@ from pytest_flaky_triage_report.signals import (
     _is_autouse_fixture,
     _is_fixture_func,
     _is_hardcoded_path_expr,
+    _is_non_float_expr,
     _is_safe_temp_expr,
     _scan_class_shared_state,
     _scan_function_signals,
@@ -284,13 +287,30 @@ def _link_float_returning_callees(indicators, float_returning_callees, scanned_t
                 if isinstance(n, ast.Assert) and not _expr_has_float_safe_guard(
                     n.test, ts_local_exprs, imported=ts_imported
                 ):
-                    has_eq = any(
-                        isinstance(sub, ast.Compare)
-                        and any(isinstance(op, (ast.Eq, ast.NotEq)) for op in sub.ops)
-                        for sub in ast.walk(n.test)
-                    )
-                    if has_eq:
-                        for sub in _expand_expr_nodes(n.test, ts_local_exprs):
+                    candidate_operands = []
+                    for sub_cmp in ast.walk(n.test):
+                        if isinstance(sub_cmp, ast.Compare):
+                            ops_list = [sub_cmp.left, *sub_cmp.comparators]
+                            for idx, op in enumerate(sub_cmp.ops):
+                                if isinstance(op, (ast.Eq, ast.NotEq)):
+                                    l_op = ops_list[idx]
+                                    r_op = ops_list[idx + 1]
+                                    if _is_non_float_expr(
+                                        l_op,
+                                        local_exprs=ts_local_exprs,
+                                        imported=ts_imported,
+                                        include_int_const=False,
+                                    ) or _is_non_float_expr(
+                                        r_op,
+                                        local_exprs=ts_local_exprs,
+                                        imported=ts_imported,
+                                        include_int_const=False,
+                                    ):
+                                        continue
+                                    candidate_operands.extend((l_op, r_op))
+                    matched_line = False
+                    for op_expr in candidate_operands:
+                        for sub in _expand_expr_nodes(op_expr, ts_local_exprs):
                             if isinstance(sub, ast.Call):
                                 _, attr, bare_fn = _resolve_call_parts(sub.func, ts_imported)
                                 if (
@@ -300,7 +320,10 @@ def _link_float_returning_callees(indicators, float_returning_callees, scanned_t
                                     or (isinstance(sub.func, ast.Attribute) and sub.func.attr == leaf_sym)
                                 ):
                                     float_assert_lines.append(n.lineno)
+                                    matched_line = True
                                     break
+                        if matched_line:
+                            break
             if float_assert_lines:
                 float_assert_lines.sort()
                 lines_str = ", ".join(str(ln) for ln in _dedup_preserve_order(float_assert_lines))
@@ -366,6 +389,25 @@ def inspect_test_source(test_id, project_dir=None, suspected_polluters=None):
     imported = _collect_local_imports(
         test_func, imported, project_dir=project_path, current_file=test_file
     )
+    base_top_pkg_aliases, base_explicit_submodules = _collect_submodule_imports(test_tree)
+    func_top_aliases, func_explicit_subs = _collect_submodule_imports(test_func)
+    base_top_pkg_aliases.update(func_top_aliases)
+    base_explicit_submodules.update(func_explicit_subs)
+    cur_anc = test_file.resolve().parent
+    proj_resolved = project_path.resolve()
+    while True:
+        anc_conftest = cur_anc / "conftest.py"
+        if anc_conftest.is_file() and anc_conftest != test_file.resolve():
+            ct_tree = _parse_file(anc_conftest)
+            if ct_tree is not None:
+                _, ct_subs = _collect_submodule_imports(ct_tree)
+                base_explicit_submodules.update(ct_subs)
+        if cur_anc == proj_resolved or cur_anc.parent == cur_anc:
+            break
+        cur_anc = cur_anc.parent
+    project_submodules = _collect_project_explicit_submodules(
+        project_path, exclude_file=test_file
+    )
 
     indicators = {
         "unseeded_randomness": [],
@@ -429,6 +471,8 @@ def inspect_test_source(test_id, project_dir=None, suspected_polluters=None):
         fix_imported = _collect_local_imports(
             fix_node, fix_imported, project_dir=project_path, current_file=fix_file
         )
+        _, fix_subs = _collect_submodule_imports(fix_node)
+        base_explicit_submodules.update(fix_subs)
         for k, v in fix_imported.items():
             imported.setdefault(k, v)
         if _tree_uses_network_mock(fix_node, imported=fix_imported):
@@ -589,6 +633,15 @@ def inspect_test_source(test_id, project_dir=None, suspected_polluters=None):
         if cur_side == "Test Side" and _tree_uses_network_mock(cur_func, imported=cur_imported):
             has_net_mock = True
 
+        cur_top_aliases = None
+        cur_explicit_subs = None
+        if cur_side == "Test Side":
+            cur_top_aliases, cur_explicit_subs = _collect_submodule_imports(cur_tree)
+            cur_explicit_subs.update(base_explicit_submodules)
+            if cur_file.resolve() == test_file.resolve():
+                for k, v in base_top_pkg_aliases.items():
+                    cur_top_aliases.setdefault(k, v)
+
         extra_decs = cls_decorators if (cur_func is test_func) else None
         cur_signals = _scan_function_signals(
             cur_func,
@@ -601,6 +654,9 @@ def inspect_test_source(test_id, project_dir=None, suspected_polluters=None):
             initial_hardcoded_vars=cur_hardcoded,
             initial_float_vars=cur_float,
             extra_decorators=extra_decs,
+            top_pkg_aliases=cur_top_aliases,
+            explicit_submodules=cur_explicit_subs,
+            project_submodules=project_submodules if cur_side == "Test Side" else None,
         )
 
         if cur_side == "Test Side":
