@@ -2514,6 +2514,147 @@ def test_implicit_submodule_import_detected_as_test_side_shared_state(tmp_path):
     ) in md_zh
 
 
+def test_readonly_uppercase_literal_constants_filtered_without_breaking_shared_cart(tmp_path):
+    """Optimization 1: Uppercase literal constants (like CMDS = ['ls', ...]) never mutated in the
+    file are ignored on read, while mutated globals (SHARED_CART) are still detected and distinguish
+    'reads' vs 'accesses/mutates' in both English and Chinese."""
+    hist_dir = tmp_path / "tests" / "history"
+    hist_dir.mkdir(parents=True)
+    (hist_dir / "test_history_json.py").write_text(
+        'CMDS = ["ls", "cat hello kitty", "echo 1"]\n'
+        'STATIC_MAP = {"a": 1, "b": (2, 3)}\n'
+        "SHARED_CART = []\n"
+        'PREFILLED_CART = ["item0"]\n'
+        'lower_cmds = ["ls", "pwd"]\n\n'
+        "def test_xonsh_history_iterates_readonly_cmds():\n"
+        "    out = []\n"
+        "    for ts, cmd in enumerate(CMDS):\n"
+        "        out.append((ts, cmd, STATIC_MAP['a']))\n"
+        "    assert len(out) == 3\n\n"
+        "def test_polluter_appends_to_carts():\n"
+        '    SHARED_CART.append("dirty")\n'
+        '    PREFILLED_CART.append("dirty2")\n\n'
+        "def test_victim_asserts_clean_shared_cart():\n"
+        "    assert SHARED_CART == []\n\n"
+        "def test_victim_asserts_prefilled_cart():\n"
+        '    assert PREFILLED_CART == ["item0"]\n\n'
+        "def test_reads_lowercase_list():\n"
+        "    assert len(lower_cmds) == 2\n",
+        encoding="utf-8",
+    )
+
+    # 1. Read-only uppercase literal constants CMDS and STATIC_MAP do NOT trigger false positives
+    info_readonly = inspect_test_source(
+        "tests/history/test_history_json.py::test_xonsh_history_iterates_readonly_cmds",
+        project_dir=tmp_path,
+    )
+    assert info_readonly["indicators"]["shared_state_interference"] == []
+
+    # 2. Polluter mutating SHARED_CART and PREFILLED_CART emits 'accesses/mutates shared module-level object'
+    info_polluter = inspect_test_source(
+        "tests/history/test_history_json.py::test_polluter_appends_to_carts",
+        project_dir=tmp_path,
+    )
+    polluter_details = [h["detail"] for h in info_polluter["indicators"]["shared_state_interference"]]
+    assert any("accesses/mutates shared module-level object `SHARED_CART`" in d for d in polluter_details)
+    assert any("accesses/mutates shared module-level object `PREFILLED_CART`" in d for d in polluter_details)
+
+    # 3. Victim reading SHARED_CART or PREFILLED_CART via bare ast.Name is STILL detected and uses 'reads' wording
+    info_victim = inspect_test_source(
+        "tests/history/test_history_json.py::test_victim_asserts_clean_shared_cart",
+        project_dir=tmp_path,
+    )
+    victim_hits = info_victim["indicators"]["shared_state_interference"]
+    assert len(victim_hits) == 1
+    assert "reads shared module-level object `SHARED_CART`" in victim_hits[0]["detail"]
+
+    info_prefilled = inspect_test_source(
+        "tests/history/test_history_json.py::test_victim_asserts_prefilled_cart",
+        project_dir=tmp_path,
+    )
+    prefilled_hits = info_prefilled["indicators"]["shared_state_interference"]
+    assert len(prefilled_hits) == 1
+    assert "reads shared module-level object `PREFILLED_CART`" in prefilled_hits[0]["detail"]
+
+    # 4. Lowercase list global is still detected as 'reads shared module-level object'
+    info_lower = inspect_test_source(
+        "tests/history/test_history_json.py::test_reads_lowercase_list",
+        project_dir=tmp_path,
+    )
+    assert len(info_lower["indicators"]["shared_state_interference"]) == 1
+    assert "reads shared module-level object `lower_cmds`" in info_lower["indicators"]["shared_state_interference"][0]["detail"]
+
+    # 5. Chinese translation distinguishes '读取了模块级共享对象' vs '读写/修改了模块级共享对象'
+    diag = _sample_diagnosis()
+    diag["tests"][1]["test_id"] = "tests/history/test_history_json.py::test_victim_asserts_clean_shared_cart"
+    diag["tests"][1]["suspected_causes"] = [
+        {
+            "candidates": ["shared_state_interference"],
+            "status": "suspected",
+            "reason": (
+                "Outcomes differ across test orders, or isolated executions pass while suite executions fail, "
+                "with a consistent repeat baseline. Suspected polluting predecessor(s): test_polluter_appends_to_carts."
+            ),
+            "run_ids": [1, 2],
+            "suspected_polluters": [
+                "tests/history/test_history_json.py::test_polluter_appends_to_carts"
+            ],
+        }
+    ]
+    md_zh = render_markdown(diag, project_dir=tmp_path, lang="zh")
+    assert "读取了模块级共享对象 `SHARED_CART`" in md_zh
+    assert "读写/修改了模块级共享对象 `SHARED_CART`" in md_zh
+
+
+def test_large_suite_suspected_polluters_wording_and_scope_hint(tmp_path):
+    """Optimization 2: suspected_polluters wording explicitly notes statistical order-predecessor
+    candidates, and suites with > 30 tests append a bilingual scope-narrowing hint (--target / -k)."""
+    diag_small = _sample_diagnosis()
+    diag_small["tests"][1]["suspected_causes"] = [
+        {
+            "candidates": ["shared_state_interference"],
+            "status": "suspected",
+            "reason": (
+                "Outcomes differ across test orders, or isolated executions pass while suite executions fail, "
+                "with a consistent repeat baseline. Suspected polluting predecessor(s): test_alpha."
+            ),
+            "run_ids": [1, 2],
+            "suspected_polluters": ["tests/test_sample.py::test_alpha"],
+        }
+    ]
+    md_small_en = render_markdown(diag_small, lang="en")
+    assert (
+        "Suspected polluting predecessor(s): test_alpha. "
+        "(statistical order-predecessor candidates inferred from execution-order intersection)"
+    ) in md_small_en
+    assert "Hint (Large Test Suite)" not in md_small_en
+
+    md_small_zh = render_markdown(diag_small, lang="zh")
+    assert "疑似前置污染源测试：test_alpha。（基于执行顺序前置交集推断的统计候选测试）" in md_small_zh
+    assert "排查提示（大型测试集）" not in md_small_zh
+
+    # Build a diagnosis with > 30 tests (32 tests total: 31 stable + 1 flaky)
+    diag_large = copy.deepcopy(diag_small)
+    stable_template = copy.deepcopy(diag_small["tests"][0])
+    extra_tests = []
+    for i in range(30):
+        t_copy = copy.deepcopy(stable_template)
+        t_copy["test_id"] = f"tests/test_extra.py::test_stable_{i}"
+        extra_tests.append(t_copy)
+    diag_large["tests"].extend(extra_tests)
+    diag_large["summary"]["tests"] = len(diag_large["tests"])
+    diag_large["summary"]["verdicts"]["stable"] += 30
+    diag_large["summary"]["records"] = sum(len(t["evidence"]) for t in diag_large["tests"])
+
+    md_large_en = render_markdown(diag_large, lang="en")
+    assert "Hint (Large Test Suite):" in md_large_en
+    assert "--target" in md_large_en and "-k" in md_large_en
+
+    md_large_zh = render_markdown(diag_large, lang="zh")
+    assert "排查提示（大型测试集）：" in md_large_zh
+    assert "--target" in md_large_zh and "-k" in md_large_zh
+
+
 
 
 

@@ -575,12 +575,37 @@ _ZH_BASIS_LABELS = {
 }
 
 
-def _translate_reason_zh(reason):
+def _format_reason_en(reason, polluters=None):
+    text = reason
+    if " Suspected polluting predecessor(s): " in text:
+        if "statistical order-predecessor candidates" not in text:
+            text = (
+                f"{text} (statistical order-predecessor candidates inferred from "
+                f"execution-order intersection)"
+            )
+    elif polluters:
+        short_p = ", ".join(_short_test_name(p) for p in polluters[:3])
+        text = (
+            f"{text} Suspected polluting predecessor(s): {short_p}. "
+            f"(statistical order-predecessor candidates inferred from execution-order intersection)"
+        )
+    return text
+
+
+def _translate_reason_zh(reason, polluters=None):
     text = reason
     polluter_suffix = ""
     if " Suspected polluting predecessor(s): " in text:
         text, p_part = text.split(" Suspected polluting predecessor(s): ", 1)
-        polluter_suffix = f" 疑似前置污染源测试：{p_part.rstrip('.')}。"
+        p_clean = p_part.split(" (statistical order-predecessor candidates")[0].rstrip(".")
+        polluter_suffix = (
+            f" 疑似前置污染源测试：{p_clean}。（基于执行顺序前置交集推断的统计候选测试）"
+        )
+    elif polluters:
+        short_p = ", ".join(_short_test_name(p) for p in polluters[:3])
+        polluter_suffix = (
+            f" 疑似前置污染源测试：{short_p}。（基于执行顺序前置交集推断的统计候选测试）"
+        )
     mapping = {
         "Outcomes vary under the same recorded seed and collected order; source investigation is needed to distinguish these candidates.": (
             "在相同哈希种子与相同执行顺序下结果仍发生波动；需结合源码 AST 检查区分随机性与并发竞态。"
@@ -633,6 +658,7 @@ def _translate_hint_zh(hint):
         "对字符串执行了未排序的 `join(...)`（请确认参数顺序是否确定）",
     )
     text = text.replace("iterates or converts unordered `set` without sorting", "对无序 `set` 进行了未排序的遍历或转换")
+    text = text.replace("reads shared module-level object", "读取了模块级共享对象")
     text = text.replace("accesses/mutates shared module-level object", "读写/修改了模块级共享对象")
     text = text.replace("mutates shared module-level variable", "通过 `global` 修改了模块级共享变量")
     text = text.replace("accesses/mutates shared module-level state", "读写/修改了业务模块级共享状态")
@@ -913,9 +939,10 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
             lines.append(f"### 3.{idx} {title_label}{side_heading} ({count_label})")
             lines.append("")
 
-            # Collect all distinct runtime (status, candidates, reason, resolution_mode) tuples across tests in this group
+            # Collect all distinct runtime (status, candidates, reason, resolution_mode, polluters) tuples across tests in this group
             distinct_reasons = []
             per_test_reason_needed = False
+            group_has_polluters = False
             reason_signatures_by_test = []
             for it in group_items:
                 t_sigs = []
@@ -929,12 +956,16 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
                     )
                     rt_cands = tuple(cause.get("runtime_candidates") or cause["candidates"])
                     cur_cands = tuple(cause["candidates"])
+                    c_polluters = tuple(cause.get("suspected_polluters") or ())
+                    if c_polluters or "Suspected polluting predecessor(s): " in (cause.get("reason") or ""):
+                        group_has_polluters = True
                     sig = (
                         cause["status"],
                         rt_cands,
                         cur_cands,
                         cause["reason"],
                         c_mode,
+                        c_polluters,
                     )
                     t_sigs.append(sig)
                     if sig not in distinct_reasons:
@@ -946,7 +977,7 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
             if len(distinct_reasons) > 1:
                 per_test_reason_needed = True
 
-            def _fmt_cause_header(status, rt_cands, cur_cands, reason, c_mode, test_id=None):
+            def _fmt_cause_header(status, rt_cands, cur_cands, reason, c_mode, polluters=(), test_id=None):
                 cur_cands_fmt = " / ".join(f"`{c}`" for c in cur_cands)
                 rt_plain = " / ".join(rt_cands)
                 if c_mode == "refined":
@@ -966,7 +997,11 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
                 else:
                     prefix = "运行时怀疑根因" if is_zh else "Runtime Suspicion"
                     status_label = f"`{status}`"
-                reason_txt = _translate_reason_zh(reason) if is_zh else reason
+                reason_txt = (
+                    _translate_reason_zh(reason, polluters=polluters)
+                    if is_zh
+                    else _format_reason_en(reason, polluters=polluters)
+                )
                 if test_id is not None:
                     return (
                         f"> - **{prefix} ({_fmt_inline_code(test_id)}, {status_label}):** "
@@ -975,8 +1010,8 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
                 return f"> - **{prefix} ({status_label}):** {cur_cands_fmt} — {reason_txt}"
 
             if distinct_reasons and not per_test_reason_needed:
-                status, rt_cands, cur_cands, reason, c_mode = distinct_reasons[0]
-                lines.append(_fmt_cause_header(status, rt_cands, cur_cands, reason, c_mode))
+                status, rt_cands, cur_cands, reason, c_mode, c_polluters = distinct_reasons[0]
+                lines.append(_fmt_cause_header(status, rt_cands, cur_cands, reason, c_mode, polluters=c_polluters))
             elif distinct_reasons:
                 for it in group_items:
                     t = it["test"]
@@ -990,6 +1025,7 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
                         )
                         rt_cands = tuple(cause.get("runtime_candidates") or cause["candidates"])
                         cur_cands = tuple(cause["candidates"])
+                        c_polluters = tuple(cause.get("suspected_polluters") or ())
                         lines.append(
                             _fmt_cause_header(
                                 cause["status"],
@@ -997,6 +1033,7 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
                                 cur_cands,
                                 cause["reason"],
                                 c_mode,
+                                polluters=c_polluters,
                                 test_id=t["test_id"],
                             )
                         )
@@ -1006,6 +1043,19 @@ def render_markdown(diagnosis, project_dir=None, lang="en"):
                     if is_zh
                     else "> - **Runtime Suspicion:** None assigned from runtime condition evidence."
                 )
+            if group_has_polluters and summary["tests"] > 30:
+                if is_zh:
+                    lines.append(
+                        f"> - **排查提示（大型测试集）：** 当前分析测试总数为 {summary['tests']}（> 30），"
+                        "在大型测试集中有限次数的 `order` 洗牌可能混入统计巧合的前置测试；"
+                        "建议通过 `--target` 或 `-k` 缩小测试范围以精确锁定污染源。"
+                    )
+                else:
+                    lines.append(
+                        f"> - **Hint (Large Test Suite):** With {summary['tests']} tests (> 30), "
+                        "a finite number of `order` shuffles may include coincidental predecessors in the intersection. "
+                        "Narrow the scope with `--target` or `-k` to isolate the exact polluting test."
+                    )
             lines.append("")
 
             s3_headers = (

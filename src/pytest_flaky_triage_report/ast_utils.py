@@ -270,6 +270,120 @@ def _extract_assign_targets_and_value(node):
     return [], None
 
 
+def _is_immutable_const_node(node):
+    """Return True if `node` is an immutable literal constant (or tuple of immutable constants)."""
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub, ast.Invert)):
+        return _is_immutable_const_node(node.operand)
+    if isinstance(node, ast.Tuple):
+        return all(_is_immutable_const_node(elt) for elt in node.elts)
+    return False
+
+
+def _is_nonempty_immutable_literal_container(node):
+    """Return True if `node` is a non-empty List/Dict/Set literal whose elements are all immutable constants."""
+    if isinstance(node, (ast.List, ast.Set)):
+        return bool(node.elts) and all(_is_immutable_const_node(elt) for elt in node.elts)
+    if isinstance(node, ast.Dict):
+        return (
+            bool(node.keys)
+            and all(k is not None and _is_immutable_const_node(k) for k in node.keys)
+            and all(_is_immutable_const_node(v) for v in node.values)
+        )
+    return False
+
+
+def _root_subscript_name(node):
+    """If `node` is a Subscript (possibly nested), return the root `ast.Name.id` if rooted at a Name."""
+    cur = node
+    while isinstance(cur, ast.Subscript):
+        cur = cur.value
+    if isinstance(cur, ast.Name):
+        return cur.id
+    return None
+
+
+def _collect_readonly_upper_literal_globals(tree, imported=None):
+    """Return set of module-level global variable names in `tree` that are:
+    1. Defined directly in `tree.body` via a non-empty literal (List/Dict/Set) of immutable constants
+       (never imported from an external module);
+    2. All-uppercase (`var_name.isupper()`);
+    3. Never mutated, reassigned, deleted, declared `global`/`nonlocal`, or accessed via `.attr`
+       anywhere in `tree`.
+    """
+    if tree is None:
+        return set()
+
+    imported_names = set((imported or {}).keys())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imported_names.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name and alias.name != "*":
+                    imported_names.add(alias.asname or alias.name)
+
+    candidates = set()
+    top_assign_counts = {}
+    for node in getattr(tree, "body", []):
+        targets, val = _extract_assign_targets_and_value(node)
+        if targets and val is not None:
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    name = target.id
+                    top_assign_counts[name] = top_assign_counts.get(name, 0) + 1
+                    if (
+                        name.isupper()
+                        and name not in imported_names
+                        and _is_nonempty_immutable_literal_container(val)
+                    ):
+                        candidates.add(name)
+
+    candidates = {name for name in candidates if top_assign_counts.get(name, 0) == 1}
+    if not candidates:
+        return set()
+
+    store_counts = {}
+    disqualified = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            store_counts[node.id] = store_counts.get(node.id, 0) + 1
+            if isinstance(node.ctx, ast.Del):
+                disqualified.add(node.id)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                disqualified.add(name)
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            disqualified.add(node.value.id)
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            root_id = _root_subscript_name(node)
+            if root_id:
+                disqualified.add(root_id)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name):
+                disqualified.add(node.target.id)
+            elif isinstance(node.target, ast.Subscript):
+                root_id = _root_subscript_name(node.target)
+                if root_id:
+                    disqualified.add(root_id)
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    disqualified.add(target.id)
+                elif isinstance(target, ast.Subscript):
+                    root_id = _root_subscript_name(target)
+                    if root_id:
+                        disqualified.add(root_id)
+
+    return {
+        name
+        for name in candidates
+        if name not in disqualified and store_counts.get(name, 0) == 1
+    }
+
+
 def _collect_imports_and_globals(tree, project_dir, current_file=None):
     """Return (imported_symbols, module_globals) for a parsed module AST.
 
@@ -323,6 +437,13 @@ def _collect_imports_and_globals(tree, project_dir, current_file=None):
                         if isinstance(val, (ast.Constant, ast.Tuple)) and target.id not in mutated_via_global:
                             continue
                         globals_map[target.id] = (node.lineno, call_name)
+
+    readonly_upper_literals = _collect_readonly_upper_literal_globals(tree, imported=imported)
+    for var_name in readonly_upper_literals:
+        if var_name in globals_map:
+            decl_line, _ = globals_map[var_name]
+            globals_map[var_name] = (decl_line, "__readonly_literal_constant__")
+
     return imported, globals_map
 
 

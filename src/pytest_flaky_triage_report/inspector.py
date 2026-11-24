@@ -663,7 +663,9 @@ def inspect_test_source(test_id, project_dir=None, suspected_polluters=None):
             scanned_test_side_funcs.append((cur_file, cur_rel, cur_func, cur_via, cur_imported))
             for key in indicators:
                 indicators[key].extend(_tag_via_helper(cur_signals[key], cur_via))
-            shared_hits = _scan_shared_globals_in_func(cur_func, cur_rel, cur_globals, "Test Side")
+            shared_hits = _scan_shared_globals_in_func(
+                cur_func, cur_rel, cur_globals, "Test Side", tree=cur_tree, imported=cur_imported
+            )
             indicators["shared_state_interference"].extend(_tag_via_helper(shared_hits, cur_via))
             if cur_cls is not None and getattr(cur_func, "name", "") not in SETUP_METHODS:
                 cls_shared_hits = _scan_class_shared_state(
@@ -691,7 +693,9 @@ def inspect_test_source(test_id, project_dir=None, suspected_polluters=None):
                 and not cur_func.name.startswith(("reset_", "clear_", "init_"))
             ):
                 indicators["shared_state_interference"].extend(
-                    _scan_shared_globals_in_func(cur_func, cur_rel, cur_globals, "Code Side")
+                    _scan_shared_globals_in_func(
+                        cur_func, cur_rel, cur_globals, "Code Side", tree=cur_tree, imported=cur_imported
+                    )
                 )
                 if cur_cls is not None:
                     indicators["shared_state_interference"].extend(

@@ -41,6 +41,7 @@ from pytest_flaky_triage_report.ast_utils import (
     UUID_FUNCTIONS,
     _call_head_name,
     _collect_local_imports,
+    _collect_readonly_upper_literal_globals,
     _collect_submodule_imports,
     _dedup_preserve_order,
     _extract_assign_targets_and_value,
@@ -1734,11 +1735,17 @@ _READONLY_GLOBAL_CALLS = frozenset({
     "Flag",
     "IntFlag",
     "frozenset",
+    "__readonly_literal_constant__",
 })
 
 
-def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
+def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side, tree=None, imported=None):
     """Return list of shared_state_interference indicator dicts for module_globals accessed/mutated in func_node."""
+    readonly_upper_literals = (
+        _collect_readonly_upper_literal_globals(tree, imported=imported)
+        if tree is not None
+        else set()
+    )
     global_decls = {
         name
         for node in ast.walk(func_node)
@@ -1783,6 +1790,7 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
     }
 
     shared_hits = []
+    mutated_vars = set()
     for node in ast.walk(func_node):
         if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.value, ast.Name):
             if isinstance(node, ast.Attribute) and id(node) in exempt_attr_ids:
@@ -1790,6 +1798,15 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
             var_name = node.value.id
             if var_name in module_globals and var_name not in local_assigned_names:
                 _, call_head = module_globals[var_name]
+                if (
+                    isinstance(node, ast.Subscript)
+                    and isinstance(node.ctx, ast.Load)
+                    and (
+                        (call_head or "") == "__readonly_literal_constant__"
+                        or var_name in readonly_upper_literals
+                    )
+                ):
+                    continue
                 is_logger_var = (var_name in _LOGGER_VAR_NAMES) or (
                     (call_head or "") in _LOGGER_INIT_CALLS
                 )
@@ -1800,10 +1817,12 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
                     and node.attr in _LOGGER_SAFE_METHODS
                 ):
                     continue
+                mutated_vars.add(var_name)
                 shared_hits.append((node.lineno, var_name))
         elif isinstance(node, ast.Global):
             for var_name in node.names:
                 if var_name in module_globals:
+                    mutated_vars.add(var_name)
                     shared_hits.append((node.lineno, var_name))
         elif (
             isinstance(node, ast.Name)
@@ -1815,6 +1834,7 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
                 _, call_head = module_globals[var_name]
                 if (
                     var_name not in _READONLY_MODULE_GLOBALS
+                    and var_name not in readonly_upper_literals
                     and (call_head or "") not in _READONLY_GLOBAL_CALLS
                 ):
                     shared_hits.append((node.lineno, var_name))
@@ -1826,11 +1846,12 @@ def _scan_shared_globals_in_func(func_node, file_rel, module_globals, side):
             continue
         seen_shared.add(var_name)
         decl_line, _ = module_globals[var_name]
+        action_verb = "accesses/mutates" if var_name in mutated_vars else "reads"
         results.append({
             "side": side,
             "location": f"{file_rel}:{lineno}",
             "detail": (
-                f"accesses/mutates shared module-level object `{var_name}` "
+                f"{action_verb} shared module-level object `{var_name}` "
                 f"(declared at `{file_rel}:{decl_line}`)"
             ),
         })
